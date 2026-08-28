@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "Urnik",
+    "slug": "urnik",
+    "version": "0.9.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "scheme": "urnik",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tjas.urnik"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundColor": "#0e1116"
+      },
+      "permissions": [
+        "SCHEDULE_EXACT_ALARM",
+        "POST_NOTIFICATIONS"
+      ],
+      "package": "com.tjas.urnik",
+      "versionCode": 1,
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "color": "#4c8dff"
+        }
+      ]
+    ]
+  }
+}
