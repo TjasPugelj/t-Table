@@ -18,7 +18,9 @@
       },
       "permissions": [
         "SCHEDULE_EXACT_ALARM",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
       ],
       "package": "com.tjas.urnik",
       "versionCode": 2,
@@ -42,6 +44,11 @@
       ],
       "expo-secure-store",
       "expo-status-bar"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "916b918c-655e-4c16-a696-70eef68e5994"
+      }
+    }
   }
 }
