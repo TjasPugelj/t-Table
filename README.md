@@ -1,4 +1,4 @@
-# Urnik — customizable WebUntis app
+# Customizable WebUntis app
 
 React Native (Expo, TypeScript). Anonymous class timetables today, designed so
 username/password login can be dropped in later without touching the UI.
