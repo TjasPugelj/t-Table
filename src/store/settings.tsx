@@ -48,11 +48,35 @@ export interface Settings {
   aliases: { subjects: Record<string, string>; teachers: Record<string, string>; rooms: Record<string, string> };
   /** Shorter names for the cramped week grid; falls back to `aliases`. */
   aliasesWeek: { subjects: Record<string, string>; teachers: Record<string, string>; rooms: Record<string, string> };
+  /** Font sizes of the three card slots in the day view. */
+  mainSize: number;
+  roomSize: number;
+  subSize: number;
+  /** Text colour per slot: follow the card (auto), or force black / white. */
+  textColorMain: 'auto' | 'black' | 'white';
+  textColorRight: 'auto' | 'black' | 'white';
+  textColorSub: 'auto' | 'black' | 'white';
+  /** Vertical placement of the right-hand field inside the box. */
+  rightAlign: 'top' | 'center' | 'bottom';
+  /** Same three slots, sized separately for the cramped week grid. */
+  weekMainSize: number;
+  weekRightSize: number;
+  weekSubSize: number;
   /** Size of the reminder icon drawn in the corner of a lesson. */
   badgeSize: number;
+  /** Free-text notes shared by every lesson of the same subject. */
+  subjectNotes: Record<string, string>;
+  /** Subject → group name, so variants like MES and MESv act as one subject. */
+  subjectGroups: Record<string, string>;
+  /** Bookmark colours per subject — several can be on at once. */
+  subjectFlags: Record<string, string[]>;
   /** Lesson reminders and the hour their day-before notifications fire. */
   reminders: Reminder[];
   reminderHour: number;
+  /** Create a reminder automatically for every exam WebUntis reports. */
+  autoExamReminders: boolean;
+  /** Days before an exam those automatic reminders fire on. */
+  autoExamDays: number[];
   /** Names seen in loaded timetables, so Settings can list them. */
   knownSubjects: string[];
   knownTeachers: string[];
@@ -63,16 +87,26 @@ export interface Settings {
   showAllPeriods: boolean;
   /** Squeeze the whole day onto one screen instead of scrolling. */
   fitToScreen: boolean;
-  /** Merge a lesson that runs across several periods into one block. */
-  mergeBlocks: boolean;
-  /** Also merge separate back-to-back entries that show the same thing. */
-  mergeIdentical: boolean;
+  /** Join consecutive lessons that show the same thing into one box. */
+  mergeDay: boolean;
+  /** Merge consecutive identical lessons into one tall box in the week grid. */
+  weekMerge: boolean;
+  /** Height of each period row in week view (aligned layout only). */
+  weekRowHeight: number;
   /** How parallel groups in the same period are laid out. */
   parallelLayout: 'row' | 'column';
   /** Jump back to today whenever the app comes back to the foreground. */
   resetOnResume: boolean;
-  /** Transition used when swiping between days and weeks. */
-  swipeAnim: 'slide' | 'fade' | 'none';
+  /**
+   * Day bar lined up with the week grid's columns, with the grid's own day
+   * header dropped. Off = the original layout: a full-width day bar plus a
+   * separate day row inside the grid.
+   */
+  alignedDayBar: boolean;
+  /** Plain monochrome marks instead of the colour emoji on reminders. */
+  minimalIcons: boolean;
+  /** Transition used when swiping between days and weeks. Always 'slide'. */
+  swipeAnim: 'slide';
   /** Untis-style line across the timetable at the current time. */
   nowLine: boolean;
   nowLineColor: string | null;
@@ -117,9 +151,24 @@ export const DEFAULTS: Settings = {
   subjectColors: {},
   aliases: { subjects: {}, teachers: {}, rooms: {} },
   aliasesWeek: { subjects: {}, teachers: {}, rooms: {} },
+  mainSize: 16,
+  roomSize: 20,
+  subSize: 13,
+  textColorMain: 'auto',
+  textColorRight: 'auto',
+  textColorSub: 'auto',
+  rightAlign: 'center',
+  weekMainSize: 11,
+  weekRightSize: 9,
+  weekSubSize: 9,
   badgeSize: 14,
+  subjectNotes: {},
+  subjectFlags: {},
+  subjectGroups: {},
   reminders: [],
   reminderHour: 18,
+  autoExamReminders: true,
+  autoExamDays: [2, 1],
   knownSubjects: [],
   knownTeachers: [],
   knownRooms: [],
@@ -127,10 +176,13 @@ export const DEFAULTS: Settings = {
   compact: false,
   showAllPeriods: true,
   fitToScreen: true,
-  mergeBlocks: true,
-  mergeIdentical: true,
+  mergeDay: true,
+  weekMerge: true,
+  weekRowHeight: 66,
   parallelLayout: 'row',
   resetOnResume: true,
+  alignedDayBar: true,
+  minimalIcons: false,
   swipeAnim: 'slide',
   nowLine: true,
   nowLineColor: null,
@@ -142,6 +194,18 @@ export const DEFAULTS: Settings = {
 };
 
 const KEY = 'untis.settings.v1';
+/**
+ * A one-time nudge, separate from the settings blob itself: the aligned day
+ * bar shipped with a false default for one build before switching to true, so
+ * anyone who had already loaded the app in that window got `alignedDayBar:
+ * false` written into their saved settings — which then wins over any later
+ * default change forever, since the load merge is {...DEFAULTS, ...stored}.
+ * Bump MIGRATION when a stored default needs correcting like this once; it
+ * never touches a value the user changed by hand afterwards, since it only
+ * fires when the stored rev is behind.
+ */
+const MIGRATION_KEY = 'untis.settings.rev';
+const MIGRATION = 1;
 
 interface Ctx {
   settings: Settings;
@@ -162,7 +226,11 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     (async () => {
       try {
         const raw = await AsyncStorage.getItem(KEY);
-        if (raw) setSettings({ ...DEFAULTS, ...JSON.parse(raw) });
+        const rev = Number((await AsyncStorage.getItem(MIGRATION_KEY)) ?? '0');
+        const loaded: Settings = raw ? { ...DEFAULTS, ...JSON.parse(raw) } : DEFAULTS;
+        if (rev < 1) loaded.alignedDayBar = true;
+        if (rev < MIGRATION) await AsyncStorage.setItem(MIGRATION_KEY, String(MIGRATION));
+        setSettings(loaded);
       } catch {
         // corrupt storage — fall back to defaults rather than crashing
       } finally {
@@ -194,4 +262,18 @@ export function useSettings(): Ctx {
   const ctx = useContext(SettingsContext);
   if (!ctx) throw new Error('useSettings must be used inside <SettingsProvider>');
   return ctx;
+}
+
+
+/** The key notes, colours and bookmarks are stored under — a group if set. */
+export function subjectKey(s: Settings, subject: string): string {
+  const g = s.subjectGroups?.[subject]?.trim();
+  return g ? g : subject;
+}
+
+/** Tolerates the old single-string shape stored by earlier versions. */
+export function subjectFlagList(s: Settings, subject: string): string[] {
+  const v = (s.subjectFlags as Record<string, unknown>)?.[subjectKey(s, subject)];
+  if (Array.isArray(v)) return v as string[];
+  return typeof v === 'string' && v ? [v] : [];
 }

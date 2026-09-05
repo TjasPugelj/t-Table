@@ -56,3 +56,13 @@ export const nowMinutes = (): number => {
   const n = new Date();
   return n.getHours() * 60 + n.getMinutes();
 };
+
+/**
+ * The current school year as ISO bounds, Aug 1 → Jul 31. Untis keeps exams and
+ * homework for the whole year, so anything narrower silently hides most of them.
+ */
+export const schoolYearRange = (): { start: string; end: string } => {
+  const now = new Date();
+  const first = now.getMonth() >= 7 ? now.getFullYear() : now.getFullYear() - 1;
+  return { start: `${first}-08-01`, end: `${first + 1}-07-31` };
+};

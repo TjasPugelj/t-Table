@@ -116,7 +116,13 @@ export interface Lesson {
   subject: string;
   subjectLong: string;
   teachers: string[];
+  /**
+   * Per teacher, whether Untis struck the name out — the teacher is away and
+   * nobody replaced them. Same order as `teachers`.
+   */
+  teachersStruck: boolean[];
   rooms: string[];
+  roomsStruck: boolean[];
   info: string[];
   substitutionText: string;
   status: EntryStatus;
@@ -131,6 +137,60 @@ export interface Lesson {
   layoutWidth: number;
   /** Group label Untis prints on the lesson, e.g. "1sk". */
   groupLabel: string | null;
-  /** The number parsed out of it, or null when the whole class attends. */
-  groupNo: number | null;
+  /** Every group number in that label — "1sk, 2sk" means both groups attend. */
+  groupNos: number[];
+}
+
+/* ------------------------------------------------------------------ */
+/* Things a signed-in account can see beyond the timetable             */
+/* ------------------------------------------------------------------ */
+
+export interface HomeworkItem {
+  id: number;
+  /** ISO date the homework was set. */
+  date: string;
+  /** ISO date it is due. */
+  dueDate: string;
+  subject: string;
+  text: string;
+  remark: string;
+  completed: boolean;
+}
+
+export interface ExamItem {
+  id: number;
+  /** ISO date. */
+  date: string;
+  start: string; // "08:00"
+  end: string; // "09:35"
+  subject: string;
+  name: string;
+  examType: string;
+  teachers: string[];
+  rooms: string[];
+  text: string;
+  grade: string | null;
+}
+
+export interface AbsenceItem {
+  id: number;
+  /** ISO date. */
+  start: string;
+  end: string;
+  startTime: string; // "08:00"
+  endTime: string;
+  reason: string;
+  text: string;
+  excused: boolean;
+  excuseStatus: string;
+}
+
+export interface MessageItem {
+  id: number;
+  subject: string;
+  preview: string;
+  sender: string;
+  /** ISO-ish timestamp string as WebUntis returns it. */
+  sentAt: string;
+  read: boolean;
 }

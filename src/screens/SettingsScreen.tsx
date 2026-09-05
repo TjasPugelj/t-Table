@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -9,22 +11,30 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { ClassEntry } from '../api/types';
 import { AnonymousAuth, UntisClient } from '../api/untis';
+import Slider from '../components/Slider';
 import { cancelScheduled, scheduledCount, sendTestNotification } from '../lib/notify';
 import { SUBJECT_COLORS, subjectColor } from '../lib/colors';
 import { LANGUAGES } from '../lib/i18n';
-import { DEFAULT_PERIODS, Settings, useSettings } from '../store/settings';
+import { DAY_OPTIONS } from '../lib/reminders';
+import LinkAccountScreen from './LinkAccountScreen';
+import { useAccount } from '../store/account';
+import { DEFAULT_PERIODS, Settings, subjectKey, useSettings } from '../store/settings';
 import { ACCENTS, Theme, THEMES } from '../theme';
 
 export default function SettingsScreen({ onClose }: { onClose: () => void }) {
   const { settings, theme, t, update, reset } = useSettings();
+  const { account, unlink } = useAccount();
+  const [linkOpen, setLinkOpen] = useState(false);
   const [classes, setClasses] = useState<ClassEntry[] | null>(null);
   const [loadingClasses, setLoadingClasses] = useState(false);
   const [classError, setClassError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [devMsg, setDevMsg] = useState<string | null>(null);
   const [pending, setPending] = useState<number | null>(null);
+  const [groupOpen, setGroupOpen] = useState<string | null>(null);
   // the long lists are what made this screen slow to open — keep them folded
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const isOpen = (k: string) => !!open[k];
@@ -112,346 +122,554 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
         </View>
 
         {/* ---- School ---- */}
-        <Text style={s.section}>{t.sectionSchool}</Text>
+        {foldHeader('school', t.sectionSchool)}
+        {isOpen('school') && (
         <View style={s.card}>
-          <Text style={s.fieldLabel}>{t.server}</Text>
-          <TextInput
-            style={s.input}
-            value={settings.host}
-            autoCapitalize="none"
-            onChangeText={(v) => update({ host: v.trim() })}
-            placeholder="sc-celje.webuntis.com"
-            placeholderTextColor={theme.textDim}
-          />
-          <Text style={s.fieldLabel}>{t.schoolKey}</Text>
-          <TextInput
-            style={s.input}
-            value={settings.school}
-            autoCapitalize="none"
-            onChangeText={(v) => update({ school: v.trim() })}
-            placeholder="sc-celje"
-            placeholderTextColor={theme.textDim}
-          />
-        </View>
+            <Text style={s.fieldLabel}>{t.server}</Text>
+            <TextInput
+              style={s.input}
+              value={settings.host}
+              autoCapitalize="none"
+              onChangeText={(v) => update({ host: v.trim() })}
+              placeholder="sc-celje.webuntis.com"
+              placeholderTextColor={theme.textDim}
+            />
+            <Text style={s.fieldLabel}>{t.schoolKey}</Text>
+            <TextInput
+              style={s.input}
+              value={settings.school}
+              autoCapitalize="none"
+              onChangeText={(v) => update({ school: v.trim() })}
+              placeholder="sc-celje"
+              placeholderTextColor={theme.textDim}
+            />
+          </View>
+        )}
+
+        {/* ---- Account ---- */}
+        {foldHeader('account', t.sectionAccount)}
+        {isOpen('account') && (
+        <View style={s.card}>
+            {account ? (
+              <>
+                <Text style={s.current}>
+                  {t.accountLinkedAs} {account.displayName}
+                </Text>
+                <Text style={s.rowHint}>{account.host}</Text>
+                <Pressable
+                  style={s.btnGhost}
+                  onPress={() =>
+                    Alert.alert(t.unlinkAccount, t.unlinkConfirm, [
+                      { text: t.cancel, style: 'cancel' },
+                      { text: t.unlinkAccount, style: 'destructive', onPress: () => unlink() },
+                    ])
+                  }
+                >
+                  <Text style={[s.btnGhostTxt, { color: theme.cancelled }]}>{t.unlinkAccount}</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Text style={s.rowHint}>{t.accountHint}</Text>
+                <Pressable style={s.btn} onPress={() => setLinkOpen(true)}>
+                  <Text style={s.btnTxt}>{t.linkAccount}</Text>
+                </Pressable>
+              </>
+            )}
+          </View>
+        )}
 
         {/* ---- Class ---- */}
-        <Text style={s.section}>{t.sectionClass}</Text>
+        {foldHeader('class', t.sectionClass)}
+        {isOpen('class') && (
         <View style={s.card}>
-          <Text style={s.current}>
-            {settings.className} · ID {settings.classId}
-          </Text>
+            <Text style={s.current}>
+              {settings.className} · ID {settings.classId}
+            </Text>
 
-          {classes === null ? (
-            <Pressable style={s.btn} onPress={loadClasses} disabled={loadingClasses}>
-              {loadingClasses ? (
-                <ActivityIndicator color={theme.accentText} />
-              ) : (
-                <Text style={s.btnTxt}>{t.loadClasses}</Text>
-              )}
-            </Pressable>
-          ) : (
-            <>
-              <TextInput
-                style={s.input}
-                value={query}
-                onChangeText={setQuery}
-                placeholder={t.searchClass}
-                placeholderTextColor={theme.textDim}
-                autoCapitalize="none"
-              />
-              <View style={{ maxHeight: 320 }}>
-                <ScrollView nestedScrollEnabled>
-                  {filtered.map((c) => {
-                    const active = c.class.id === settings.classId;
-                    return (
-                      <Pressable
-                        key={c.class.id}
-                        onPress={() =>
-                          update({ classId: c.class.id, className: c.class.shortName })
-                        }
-                        style={[s.classRow, active && { borderColor: theme.accent }]}
-                      >
-                        <Text style={[s.className, active && { color: theme.accent }]}>
-                          {c.class.shortName}
-                        </Text>
-                        <Text style={s.classLong} numberOfLines={1}>
-                          {c.class.longName}
-                        </Text>
-                        <Text style={s.classDept}>{c.department?.shortName ?? ''}</Text>
-                      </Pressable>
-                    );
-                  })}
-                  {filtered.length === 0 && <Text style={s.rowHint}>{t.noResults}</Text>}
-                </ScrollView>
-              </View>
-            </>
-          )}
-          {!!classError && <Text style={s.err}>{classError}</Text>}
-        </View>
+            {classes === null ? (
+              <Pressable style={s.btn} onPress={loadClasses} disabled={loadingClasses}>
+                {loadingClasses ? (
+                  <ActivityIndicator color={theme.accentText} />
+                ) : (
+                  <Text style={s.btnTxt}>{t.loadClasses}</Text>
+                )}
+              </Pressable>
+            ) : (
+              <>
+                <TextInput
+                  style={s.input}
+                  value={query}
+                  onChangeText={setQuery}
+                  placeholder={t.searchClass}
+                  placeholderTextColor={theme.textDim}
+                  autoCapitalize="none"
+                />
+                <View style={{ maxHeight: 320 }}>
+                  <ScrollView nestedScrollEnabled>
+                    {filtered.map((c) => {
+                      const active = c.class.id === settings.classId;
+                      return (
+                        <Pressable
+                          key={c.class.id}
+                          onPress={() =>
+                            update({ classId: c.class.id, className: c.class.shortName })
+                          }
+                          style={[s.classRow, active && { borderColor: theme.accent }]}
+                        >
+                          <Text style={[s.className, active && { color: theme.accent }]}>
+                            {c.class.shortName}
+                          </Text>
+                          <Text style={s.classLong} numberOfLines={1}>
+                            {c.class.longName}
+                          </Text>
+                          <Text style={s.classDept}>{c.department?.shortName ?? ''}</Text>
+                        </Pressable>
+                      );
+                    })}
+                    {filtered.length === 0 && <Text style={s.rowHint}>{t.noResults}</Text>}
+                  </ScrollView>
+                </View>
+              </>
+            )}
+            {!!classError && <Text style={s.err}>{classError}</Text>}
+          </View>
+        )}
 
         {/* ---- Appearance ---- */}
-        <Text style={s.section}>{t.sectionAppearance}</Text>
+        {foldHeader('appearance', t.sectionAppearance)}
+        {isOpen('appearance') && (
         <View style={s.card}>
-          <Text style={s.fieldLabel}>{t.theme}</Text>
-          <View style={s.chips}>
-            {Object.entries(THEMES).map(([key, th]) => (
-              <Pressable
-                key={key}
-                onPress={() => update({ themeKey: key })}
-                style={[
-                  s.chip,
-                  settings.themeKey === key && { borderColor: theme.accent, borderWidth: 2 },
-                ]}
-              >
-                <View style={[s.swatch, { backgroundColor: th.bg, borderColor: th.border }]} />
-                <Text style={s.chipTxt}>{th.name}</Text>
-              </Pressable>
-            ))}
-          </View>
+            <Text style={s.fieldLabel}>{t.theme}</Text>
+            <View style={s.chips}>
+              {Object.entries(THEMES).map(([key, th]) => (
+                <Pressable
+                  key={key}
+                  onPress={() => update({ themeKey: key })}
+                  style={[
+                    s.chip,
+                    settings.themeKey === key && { borderColor: theme.accent, borderWidth: 2 },
+                  ]}
+                >
+                  <View style={[s.swatch, { backgroundColor: th.bg, borderColor: th.border }]} />
+                  <Text style={s.chipTxt}>{th.name}</Text>
+                </Pressable>
+              ))}
+            </View>
 
-          <Text style={s.fieldLabel}>{t.accent}</Text>
-          <View style={s.chips}>
-            <Pressable
-              onPress={() => update({ accent: null })}
-              style={[
-                s.dot,
-                { backgroundColor: THEMES[settings.themeKey]?.accent ?? '#4c8dff' },
-                settings.accent === null && s.dotActive,
-              ]}
-            />
-            {ACCENTS.map((c) => (
+            <Text style={s.fieldLabel}>{t.accent}</Text>
+            <View style={s.chips}>
               <Pressable
-                key={c}
-                onPress={() => update({ accent: c })}
-                style={[s.dot, { backgroundColor: c }, settings.accent === c && s.dotActive]}
+                onPress={() => update({ accent: null })}
+                style={[
+                  s.dot,
+                  { backgroundColor: THEMES[settings.themeKey]?.accent ?? '#4c8dff' },
+                  settings.accent === null && s.dotActive,
+                ]}
               />
-            ))}
+              {ACCENTS.map((c) => (
+                <Pressable
+                  key={c}
+                  onPress={() => update({ accent: c })}
+                  style={[s.dot, { backgroundColor: c }, settings.accent === c && s.dotActive]}
+                />
+              ))}
+            </View>
           </View>
-        </View>
+        )}
 
         {/* ---- Display ---- */}
-        <Text style={s.section}>{t.sectionDisplay}</Text>
+        {foldHeader('display', t.sectionDisplay)}
+        {isOpen('display') && (
         <View style={s.card}>
-          {toggle('showAllPeriods', t.showAllPeriods)}
-          {toggle('fitToScreen', t.fitToScreen)}
-          {toggle('resetOnResume', t.resetOnResume)}
-          {toggle('mergeBlocks', t.mergeBlocks)}
-          {toggle('mergeIdentical', t.mergeIdentical)}
+            {toggle('showAllPeriods', t.showAllPeriods)}
+            {toggle('fitToScreen', t.fitToScreen)}
+            {toggle('resetOnResume', t.resetOnResume)}
+            {toggle('mergeDay', t.mergeDay)}
+            {toggle('weekMerge', t.weekMerge)}
 
-          <Text style={s.fieldLabel}>{t.swipeAnim}</Text>
-          <View style={s.chips}>
+            <Text style={s.fieldLabel}>{t.rightAlign}</Text>
+            <View style={s.chips}>
+              {(
+                [
+                  ['top', t.alignTop],
+                  ['center', t.alignCenter],
+                  ['bottom', t.alignBottom],
+                ] as const
+              ).map(([key, label]) => (
+                <Pressable
+                  key={key}
+                  onPress={() => update({ rightAlign: key })}
+                  style={[
+                    s.chip,
+                    settings.rightAlign === key && { borderColor: theme.accent, borderWidth: 2 },
+                  ]}
+                >
+                  <Text style={s.chipTxt}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={[s.fieldLabel, { fontSize: 13, color: theme.text }]}>{t.textColors}</Text>
             {(
               [
-                ['slide', t.animSlide],
-                ['fade', t.animFade],
-                ['none', t.animNone],
+                ['textColorMain', t.mainSize],
+                ['textColorRight', t.roomSize],
+                ['textColorSub', t.subSize],
               ] as const
             ).map(([key, label]) => (
-              <Pressable
-                key={key}
-                onPress={() => update({ swipeAnim: key })}
-                style={[
-                  s.chip,
-                  settings.swipeAnim === key && { borderColor: theme.accent, borderWidth: 2 },
-                ]}
-              >
-                <Text style={s.chipTxt}>{label}</Text>
-              </Pressable>
+              <View key={key} style={s.sliderRow}>
+                <Text style={s.sliderLabel}>{label}</Text>
+                <View style={[s.chips, { flex: 1 }]}>
+                  {(
+                    [
+                      ['auto', t.colorAuto],
+                      ['black', t.colorBlack],
+                      ['white', t.colorWhite],
+                    ] as const
+                  ).map(([mode, modeLabel]) => (
+                    <Pressable
+                      key={mode}
+                      onPress={() => update({ [key]: mode } as Partial<Settings>)}
+                      style={[
+                        s.chip,
+                        settings[key] === mode && { borderColor: theme.accent, borderWidth: 2 },
+                      ]}
+                    >
+                      <Text style={s.chipTxt}>{modeLabel}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
             ))}
-          </View>
 
-          <Text style={s.fieldLabel}>{t.badgeSize}</Text>
-          <View style={s.chips}>
-            {[10, 12, 14, 17, 21, 26, 32].map((size) => (
-              <Pressable
-                key={size}
-                onPress={() => update({ badgeSize: size })}
-                style={[
-                  s.chip,
-                  settings.badgeSize === size && { borderColor: theme.accent, borderWidth: 2 },
-                ]}
-              >
-                <Text style={{ fontSize: size }}>🔔</Text>
-              </Pressable>
-            ))}
-          </View>
-
-          <Text style={s.fieldLabel}>{t.colorSource}</Text>
-          <View style={s.chips}>
+            <Text style={[s.fieldLabel, { fontSize: 13, color: theme.text }]}>{t.sectionSizes}</Text>
             {(
               [
-                ['status', t.colorStatus],
-                ['subject', t.colorSubject],
-                ['untis', t.colorUntis],
+                [t.sizesDay, 10, 28, [
+                  ['mainSize', t.mainSize],
+                  ['roomSize', t.roomSize],
+                  ['subSize', t.subSize],
+                ]],
+                [t.sizesWeek, 6, 18, [
+                  ['weekMainSize', t.mainSize],
+                  ['weekSubSize', t.subSize],
+                ]],
               ] as const
-            ).map(([key, label]) => (
-              <Pressable
-                key={key}
-                onPress={() => update({ colorSource: key })}
-                style={[
-                  s.chip,
-                  settings.colorSource === key && { borderColor: theme.accent, borderWidth: 2 },
-                ]}
-              >
-                <Text style={s.chipTxt}>{label}</Text>
-              </Pressable>
+            ).map(([groupLabel, min, max, rows]) => (
+              <View key={groupLabel} style={{ gap: 2, marginTop: 4 }}>
+                <Text style={[s.fieldLabel, { color: theme.text }]}>{groupLabel}</Text>
+                {rows.map(([key, label]) => (
+                  <View key={key} style={s.sliderRow}>
+                    <Text style={s.sliderLabel}>{label}</Text>
+                    <View style={{ flex: 1 }}>
+                      <Slider
+                        value={settings[key]}
+                        min={min}
+                        max={max}
+                        theme={theme}
+                        onChange={(v) => update({ [key]: v } as Partial<Settings>)}
+                      />
+                    </View>
+                  </View>
+                ))}
+              </View>
             ))}
-          </View>
 
-          <Text style={s.fieldLabel}>{t.cardStyle}</Text>
-          <View style={s.chips}>
-            {(
-              [
-                ['stripe', t.cardStripe],
-                ['tint', t.cardTint],
-                ['solid', t.cardSolid],
-              ] as const
-            ).map(([key, label]) => (
-              <Pressable
-                key={key}
-                onPress={() => update({ cardStyle: key })}
-                style={[
-                  s.chip,
-                  settings.cardStyle === key && { borderColor: theme.accent, borderWidth: 2 },
-                ]}
-              >
-                <Text style={s.chipTxt}>{label}</Text>
-              </Pressable>
-            ))}
+            <Text style={s.fieldLabel}>{t.weekRowHeight}</Text>
+            <Slider
+              value={settings.weekRowHeight}
+              min={40}
+              max={110}
+              theme={theme}
+              onChange={(v) => update({ weekRowHeight: v })}
+            />
+
+            <Text style={s.fieldLabel}>{t.badgeSize}</Text>
+            <Slider
+              value={settings.badgeSize}
+              min={8}
+              max={36}
+              theme={theme}
+              onChange={(v) => update({ badgeSize: v })}
+            />
+
+            <Text style={s.fieldLabel}>{t.colorSource}</Text>
+            <View style={s.chips}>
+              {(
+                [
+                  ['status', t.colorStatus],
+                  ['subject', t.colorSubject],
+                  ['untis', t.colorUntis],
+                ] as const
+              ).map(([key, label]) => (
+                <Pressable
+                  key={key}
+                  onPress={() => update({ colorSource: key })}
+                  style={[
+                    s.chip,
+                    settings.colorSource === key && { borderColor: theme.accent, borderWidth: 2 },
+                  ]}
+                >
+                  <Text style={s.chipTxt}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Text style={s.fieldLabel}>{t.cardStyle}</Text>
+            <View style={s.chips}>
+              {(
+                [
+                  ['stripe', t.cardStripe],
+                  ['tint', t.cardTint],
+                  ['solid', t.cardSolid],
+                ] as const
+              ).map(([key, label]) => (
+                <Pressable
+                  key={key}
+                  onPress={() => update({ cardStyle: key })}
+                  style={[
+                    s.chip,
+                    settings.cardStyle === key && { borderColor: theme.accent, borderWidth: 2 },
+                  ]}
+                >
+                  <Text style={s.chipTxt}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+            {toggle('hideCancelled', t.hideCancelled)}
+            {toggle('compact', t.compact)}
           </View>
-          {toggle('hideCancelled', t.hideCancelled)}
-          {toggle('compact', t.compact)}
-        </View>
+        )}
 
         {/* ---- Current time ---- */}
-        <Text style={s.section}>{t.sectionNow}</Text>
+        {foldHeader('now', t.sectionNow)}
+        {isOpen('now') && (
         <View style={s.card}>
-          {toggle('nowLine', t.nowLine)}
-          <Text style={s.fieldLabel}>{t.nowLineColor}</Text>
-          <View style={s.chips}>
-            <Pressable
-              onPress={() => update({ nowLineColor: null })}
-              style={[
-                s.dot,
-                { backgroundColor: theme.accent },
-                settings.nowLineColor === null && s.dotActive,
-              ]}
-            />
-            {ACCENTS.map((c) => (
+            {toggle('nowLine', t.nowLine)}
+            <Text style={s.fieldLabel}>{t.nowLineColor}</Text>
+            <View style={s.chips}>
               <Pressable
-                key={c}
-                onPress={() => update({ nowLineColor: c })}
-                style={[s.dot, { backgroundColor: c }, settings.nowLineColor === c && s.dotActive]}
+                onPress={() => update({ nowLineColor: null })}
+                style={[
+                  s.dot,
+                  { backgroundColor: theme.accent },
+                  settings.nowLineColor === null && s.dotActive,
+                ]}
               />
-            ))}
+              {ACCENTS.map((c) => (
+                <Pressable
+                  key={c}
+                  onPress={() => update({ nowLineColor: c })}
+                  style={[s.dot, { backgroundColor: c }, settings.nowLineColor === c && s.dotActive]}
+                />
+              ))}
+            </View>
+            {toggle('dimPast', t.dimPast)}
+            {toggle('nowProgress', t.nowProgress)}
           </View>
-          {toggle('dimPast', t.dimPast)}
-          {toggle('nowProgress', t.nowProgress)}
-        </View>
+        )}
 
         {/* ---- Substitution outline ---- */}
-        <Text style={s.section}>{t.changedOutline}</Text>
+        {foldHeader('outline', t.changedOutline)}
+        {isOpen('outline') && (
         <View style={s.card}>
-          <Text style={s.fieldLabel}>{t.outlineWidth}</Text>
-          <View style={s.chips}>
-            {[1, 2.5, 4].map((w) => (
-              <Pressable
-                key={w}
-                onPress={() => update({ changedWidth: w })}
-                style={[
-                  s.chip,
-                  settings.changedWidth === w && { borderColor: theme.accent, borderWidth: 2 },
-                ]}
-              >
+            <Text style={s.fieldLabel}>{t.outlineWidth}</Text>
+            <Slider
+              value={settings.changedWidth}
+              min={0.5}
+              max={6}
+              step={0.5}
+              theme={theme}
+              onChange={(v) => update({ changedWidth: v })}
+              suffix={
                 <View
                   style={{
-                    width: 26,
-                    height: 16,
-                    borderRadius: 5,
-                    borderWidth: w,
+                    width: 30,
+                    height: 18,
+                    borderRadius: 6,
+                    borderWidth: settings.changedWidth,
                     borderColor: settings.changedColor ?? theme.changed,
                   }}
                 />
-              </Pressable>
-            ))}
-          </View>
-          <View style={s.chips}>
-            <Pressable
-              onPress={() => update({ changedColor: null })}
-              style={[
-                s.dot,
-                { backgroundColor: theme.changed },
-                settings.changedColor === null && s.dotActive,
-              ]}
+              }
             />
-            {ACCENTS.map((c) => (
-              <Pressable
-                key={c}
-                onPress={() => update({ changedColor: c })}
-                style={[s.dot, { backgroundColor: c }, settings.changedColor === c && s.dotActive]}
-              />
-            ))}
-          </View>
-        </View>
 
-        {/* ---- Field layout ---- */}
-        <Text style={s.section}>{t.sectionFields}</Text>
-        <View style={s.card}>
-          {(
-            [
-              ['day', t.renameDayCol],
-              ['week', t.renameWeekCol],
-            ] as const
-          ).map(([view, viewLabel]) => (
-            <View key={view} style={{ gap: 6, marginBottom: 6 }}>
-              <Text style={[s.fieldLabel, { fontSize: 13, color: theme.text }]}>{viewLabel}</Text>
-              {(
-                [
-                  ['main', t.fieldMain],
-                  ['right', t.fieldRight],
-                  ['sub', t.fieldSub],
-                ] as const
-              ).map(([slot, slotLabel]) => (
-                <View key={slot} style={{ gap: 4 }}>
-                  <Text style={s.fieldLabel}>{slotLabel}</Text>
-                  <View style={s.chips}>
-                    {(
-                      [
-                        ['subject', t.fSubject],
-                        ['teacher', t.fTeacher],
-                        ['room', t.fRoom],
-                        ['none', t.fNone],
-                      ] as const
-                    ).map(([f, fLabel]) => (
-                      <Pressable
-                        key={f}
-                        onPress={() =>
-                          update({
-                            fields: {
-                              ...settings.fields,
-                              [view]: { ...settings.fields[view], [slot]: f },
-                            },
-                          })
-                        }
-                        style={[
-                          s.chip,
-                          settings.fields[view][slot] === f && {
-                            borderColor: theme.accent,
-                            borderWidth: 2,
-                          },
-                        ]}
-                      >
-                        <Text style={s.chipTxt}>{fLabel}</Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </View>
+            <View style={s.chips}>
+              <Pressable
+                onPress={() => update({ changedColor: null })}
+                style={[
+                  s.dot,
+                  { backgroundColor: theme.changed },
+                  settings.changedColor === null && s.dotActive,
+                ]}
+              />
+              {ACCENTS.map((c) => (
+                <Pressable
+                  key={c}
+                  onPress={() => update({ changedColor: c })}
+                  style={[s.dot, { backgroundColor: c }, settings.changedColor === c && s.dotActive]}
+                />
               ))}
             </View>
-          ))}
-        </View>
+          </View>
+        )}
+
+        {/* ---- Field layout ---- */}
+        {foldHeader('fields', t.sectionFields)}
+        {isOpen('fields') && (
+        <View style={s.card}>
+            {(
+              [
+                ['day', t.renameDayCol],
+                ['week', t.renameWeekCol],
+              ] as const
+            ).map(([view, viewLabel]) => (
+              <View key={view} style={{ gap: 6, marginBottom: 6 }}>
+                <Text style={[s.fieldLabel, { fontSize: 13, color: theme.text }]}>{viewLabel}</Text>
+                {(
+                  view === 'week'
+                    ? ([
+                        ['main', t.fieldMain],
+                        ['sub', t.fieldSub],
+                      ] as const)
+                    : ([
+                        ['main', t.fieldMain],
+                        ['right', t.fieldRight],
+                        ['sub', t.fieldSub],
+                      ] as const)
+                ).map(([slot, slotLabel]) => (
+                  <View key={slot} style={{ gap: 4 }}>
+                    <Text style={s.fieldLabel}>{slotLabel}</Text>
+                    <View style={s.chips}>
+                      {(
+                        [
+                          ['subject', t.fSubject],
+                          ['teacher', t.fTeacher],
+                          ['room', t.fRoom],
+                          ['none', t.fNone],
+                        ] as const
+                      ).map(([f, fLabel]) => (
+                        <Pressable
+                          key={f}
+                          onPress={() =>
+                            update({
+                              fields: {
+                                ...settings.fields,
+                                [view]: { ...settings.fields[view], [slot]: f },
+                              },
+                            })
+                          }
+                          style={[
+                            s.chip,
+                            settings.fields[view][slot] === f && {
+                              borderColor: theme.accent,
+                              borderWidth: 2,
+                            },
+                          ]}
+                        >
+                          <Text style={s.chipTxt}>{fLabel}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ))}
+          </View>
+        )}
 
         {/* ---- Subject colours ---- */}
+        {foldHeader('groups', t.sectionGroups)}
+        {isOpen('groups') && (
+        <View style={s.card}>
+          <Text style={s.rowHint}>{t.groupsHint}</Text>
+          {settings.knownSubjects.length === 0 && (
+            <Text style={s.rowHint}>{t.noSubjectsYet}</Text>
+          )}
+          {settings.knownSubjects.map((name) => {
+            const groupKey = subjectKey(settings, name);
+            const members = settings.knownSubjects.filter(
+              (x) => x !== name && subjectKey(settings, x) === groupKey,
+            );
+            const open = groupOpen === name;
+            return (
+              <View key={name}>
+                <View style={s.renameRow}>
+                  <Text style={s.renameOrig} numberOfLines={1}>
+                    {name}
+                  </Text>
+                  <Pressable
+                    style={[s.input, s.dropdown]}
+                    onPress={() => setGroupOpen(open ? null : name)}
+                  >
+                    <Text
+                      style={{ color: members.length ? theme.text : theme.textDim, flex: 1 }}
+                      numberOfLines={1}
+                    >
+                      {members.length ? [name, ...members].join(' + ') : groupKey}
+                    </Text>
+                    <Text style={{ color: theme.textDim }}>{open ? '▲' : '▼'}</Text>
+                  </Pressable>
+                </View>
+
+                {open && (
+                  <View style={s.dropdownList}>
+                    <ScrollView nestedScrollEnabled style={{ maxHeight: 240 }}>
+                      {settings.knownSubjects
+                        .filter((x) => x !== name)
+                        .map((opt) => {
+                          const joined = subjectKey(settings, opt) === groupKey;
+                          return (
+                            <Pressable
+                              key={opt}
+                              onPress={() => {
+                                const next = { ...settings.subjectGroups };
+                                // several subjects can join in one go — the list stays open
+                                if (joined) delete next[opt];
+                                else next[opt] = groupKey;
+                                update({ subjectGroups: next });
+                              }}
+                              style={s.dropdownItem}
+                            >
+                              <Text
+                                style={{
+                                  color: joined ? theme.accent : theme.text,
+                                  fontWeight: joined ? '800' : '500',
+                                }}
+                              >
+                                {joined ? '✓ ' : '   '}
+                                {opt}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+
+                      {members.length > 0 && (
+                        <Pressable
+                          onPress={() => {
+                            const next = { ...settings.subjectGroups };
+                            for (const m of members) delete next[m];
+                            delete next[name];
+                            update({ subjectGroups: next });
+                            setGroupOpen(null);
+                          }}
+                          style={[s.dropdownItem, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: theme.border }]}
+                        >
+                          <Text style={{ color: theme.cancelled, fontWeight: '700' }}>
+                            {t.flagNone}
+                          </Text>
+                        </Pressable>
+                      )}
+                    </ScrollView>
+                  </View>
+                )}
+              </View>
+            );
+          })}
+        </View>
+        )}
+
         {foldHeader('colors', t.sectionSubjectColors)}
         {isOpen('colors') && (
         <View style={s.card}>
@@ -459,7 +677,8 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
             <Text style={s.rowHint}>{t.noSubjectsYet}</Text>
           )}
           {settings.knownSubjects.map((name) => {
-            const picked = settings.subjectColors[name];
+            const key = subjectKey(settings, name);
+            const picked = settings.subjectColors[key];
             return (
               <View key={name} style={s.subjRow}>
                 <Text style={s.subjName} numberOfLines={1}>
@@ -469,12 +688,12 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
                   <Pressable
                     onPress={() => {
                       const next = { ...settings.subjectColors };
-                      delete next[name];
+                      delete next[key];
                       update({ subjectColors: next });
                     }}
                     style={[
                       s.swatchDot,
-                      { backgroundColor: subjectColor(name), opacity: 0.45 },
+                      { backgroundColor: subjectColor(key), opacity: 0.45 },
                       !picked && s.swatchActive,
                     ]}
                   />
@@ -482,7 +701,7 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
                     <Pressable
                       key={c}
                       onPress={() =>
-                        update({ subjectColors: { ...settings.subjectColors, [name]: c } })
+                        update({ subjectColors: { ...settings.subjectColors, [key]: c } })
                       }
                       style={[
                         s.swatchDot,
@@ -626,44 +845,91 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
         </View>
         )}
 
+        {/* ---- Reminders ---- */}
+        {foldHeader('reminders', t.sectionReminders)}
+        {isOpen('reminders') && (
+          <View style={s.card}>
+            {toggle('autoExamReminders', t.autoExamReminders)}
+            <Text style={s.rowHint}>{t.autoExamHint}</Text>
+
+            <Text style={s.fieldLabel}>{t.autoExamDays}</Text>
+            <View style={s.chips}>
+              {DAY_OPTIONS.map((d) => {
+                const on = (settings.autoExamDays ?? []).includes(d);
+                return (
+                  <Pressable
+                    key={d}
+                    onPress={() =>
+                      update({
+                        autoExamDays: on
+                          ? (settings.autoExamDays ?? []).filter((x) => x !== d)
+                          : [...(settings.autoExamDays ?? []), d].sort((a, b) => b - a),
+                      })
+                    }
+                    style={[s.chip, on && { borderColor: theme.accent, borderWidth: 2 }]}
+                  >
+                    <Text style={[s.chipTxt, on && { color: theme.accent }]}>
+                      {d === 0 ? t.sameDay : `${d}${t.dayShortSuffix}`}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Text style={s.fieldLabel}>{t.notifyHour}</Text>
+            <Slider
+              value={settings.reminderHour}
+              min={0}
+              max={23}
+              theme={theme}
+              onChange={(v) => update({ reminderHour: v })}
+            />
+          </View>
+        )}
+
         {/* ---- Developer ---- */}
-        <Text style={s.section}>{t.sectionDev}</Text>
+        {foldHeader('dev', t.sectionDev)}
+        {isOpen('dev') && (
         <View style={s.card}>
-          <Pressable
-            style={s.btn}
-            onPress={async () => {
-              const ok = await sendTestNotification(5);
-              setDevMsg(ok ? t.testSent : t.testFailed);
-              setPending(await scheduledCount());
-            }}
-          >
-            <Text style={s.btnTxt}>{t.testNotification}</Text>
-          </Pressable>
+            {toggle('alignedDayBar', t.alignedDayBar)}
+            {toggle('minimalIcons', t.minimalIcons)}
 
-          <Pressable
-            style={s.btnGhost}
-            onPress={async () => setPending(await scheduledCount())}
-          >
-            <Text style={s.btnGhostTxt}>
-              {t.scheduledCount}
-              {pending === null ? '' : `: ${pending}`}
-            </Text>
-          </Pressable>
+            <Pressable
+              style={s.btn}
+              onPress={async () => {
+                const ok = await sendTestNotification(5);
+                setDevMsg(ok ? t.testSent : t.testFailed);
+                setPending(await scheduledCount());
+              }}
+            >
+              <Text style={s.btnTxt}>{t.testNotification}</Text>
+            </Pressable>
 
-          <Pressable
-            style={s.btnGhost}
-            onPress={async () => {
-              const ids = settings.reminders.flatMap((r) => r.scheduled);
-              await cancelScheduled(ids);
-              update({ reminders: settings.reminders.map((r) => ({ ...r, scheduled: [] })) });
-              setPending(await scheduledCount());
-            }}
-          >
-            <Text style={[s.btnGhostTxt, { color: theme.cancelled }]}>{t.clearScheduled}</Text>
-          </Pressable>
+            <Pressable
+              style={s.btnGhost}
+              onPress={async () => setPending(await scheduledCount())}
+            >
+              <Text style={s.btnGhostTxt}>
+                {t.scheduledCount}
+                {pending === null ? '' : `: ${pending}`}
+              </Text>
+            </Pressable>
 
-          {!!devMsg && <Text style={s.rowHint}>{devMsg}</Text>}
-        </View>
+            <Pressable
+              style={s.btnGhost}
+              onPress={async () => {
+                const ids = settings.reminders.flatMap((r) => r.scheduled);
+                await cancelScheduled(ids);
+                update({ reminders: settings.reminders.map((r) => ({ ...r, scheduled: [] })) });
+                setPending(await scheduledCount());
+              }}
+            >
+              <Text style={[s.btnGhostTxt, { color: theme.cancelled }]}>{t.clearScheduled}</Text>
+            </Pressable>
+
+            {!!devMsg && <Text style={s.rowHint}>{devMsg}</Text>}
+          </View>
+        )}
 
         <Pressable style={[s.btnGhost, { marginTop: 24 }]} onPress={reset}>
           <Text style={[s.btnGhostTxt, { color: theme.cancelled }]}>{t.resetAll}</Text>
@@ -671,6 +937,16 @@ export default function SettingsScreen({ onClose }: { onClose: () => void }) {
 
         <Text style={s.footer}>{t.footer}</Text>
       </ScrollView>
+
+      <Modal
+        visible={linkOpen}
+        animationType="slide"
+        onRequestClose={() => setLinkOpen(false)}
+      >
+        <SafeAreaView style={{ flex: 1, backgroundColor: theme.bg }} edges={['top', 'bottom']}>
+          <LinkAccountScreen onClose={() => setLinkOpen(false)} />
+        </SafeAreaView>
+      </Modal>
     </View>
   );
 }
@@ -771,12 +1047,25 @@ const makeStyles = (t: Theme) =>
     swatch: { width: 16, height: 16, borderRadius: 8, borderWidth: 1 },
     dot: { width: 30, height: 30, borderRadius: 15 },
     dotActive: { borderWidth: 3, borderColor: '#ffffff88' },
+    sliderRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    sliderLabel: { color: t.textDim, fontSize: 12, fontWeight: '600', width: 56 },
     subjRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     subjName: { color: t.text, fontWeight: '700', width: 62, fontSize: 13 },
     swatchDot: { width: 26, height: 26, borderRadius: 13, marginRight: 6 },
     swatchActive: { borderWidth: 3, borderColor: '#ffffff99' },
     renameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     renameOrig: { color: t.textDim, fontSize: 12, width: 66 },
+    dropdown: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 },
+    dropdownList: {
+      marginTop: 4,
+      marginBottom: 6,
+      marginLeft: 66,
+      borderRadius: 10,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: t.border,
+      backgroundColor: t.surfaceAlt,
+    },
+    dropdownItem: { paddingVertical: 10, paddingHorizontal: 12 },
     renameHead: { color: t.textDim, fontSize: 10, fontWeight: '700', textTransform: 'uppercase' },
     periodRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
     periodLabel: { width: 48, textAlign: 'center' },

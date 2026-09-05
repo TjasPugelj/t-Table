@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -15,11 +15,14 @@ import {
 } from 'react-native';
 import type { GestureResponderEvent } from 'react-native';
 import { Lesson, TimetableDay } from '../api/types';
-import { AnonymousAuth, toLesson, toMinutes, UntisClient } from '../api/untis';
+import { PasswordAuth } from '../api/passwordAuth';
+import { resourceTypeForPerson, SessionAuth } from '../api/qrAuth';
+import { AnonymousAuth, toLesson, toMinutes, UntisClient, UntisAuth } from '../api/untis';
 import DatePicker from '../components/DatePicker';
 import LessonCard from '../components/LessonCard';
 import LessonSheet from '../components/LessonSheet';
-import { cardSkin } from '../lib/colors';
+import StickyNote from '../components/StickyNote';
+import { cardSkin, pickTextColor } from '../lib/colors';
 import { fieldText } from '../lib/display';
 import {
   addDays,
@@ -39,8 +42,11 @@ import {
   mergeSameSubject,
   splitGroups,
 } from '../lib/layout';
-import { findReminder, KIND_ICON } from '../lib/reminders';
-import { useSettings } from '../store/settings';
+import { syncExamReminders } from '../lib/examReminders';
+import { findReminder, kindIcon } from '../lib/reminders';
+import { useAccount } from '../store/account';
+import { useSchoolData } from '../store/schoolData';
+import { subjectFlagList, useSettings } from '../store/settings';
 import { Theme } from '../theme';
 
 type WeekCache = Record<string, TimetableDay[]>;
@@ -49,6 +55,11 @@ const SCREEN_W = Dimensions.get('window').width;
 /** How far a page slides out of the way — a short hop reads better than a full screen. */
 const SLIDE = Math.min(140, SCREEN_W * 0.32);
 const PERIOD_H = 92;
+/**
+ * How long a second tap still counts as a double-tap. The lesson sheet waits
+ * exactly this long before opening, so a double-tap never flashes it open.
+ */
+const DOUBLE_TAP_MS = 280;
 
 const keyFor = (l: Lesson | null) => l?.id ?? 'free';
 
@@ -84,8 +95,21 @@ function useCarousel(
   allowPull: boolean,
   /** Called as soon as a drag starts, so a pending tap action can be dropped. */
   onDragStart: () => void,
+  /**
+   * Whether this gesture drags the day strip along with the finger — only the
+   * strip's own drag does. A swipe on the timetable leaves the strip in place
+   * until release, when stripStep decides whether it slides along.
+   */
+  stripLive: (which: 'primary' | 'alt') => boolean,
+  /**
+   * Whether the step this gesture is about to commit changes the week, so the
+   * strip slides out and back in together with the timetable.
+   */
+  stripStep: (which: 'primary' | 'alt', dir: 1 | -1) => boolean,
 ) {
   const tx = useRef(new Animated.Value(0)).current;
+  /** The day strip slides too, but only when the gesture changes the week. */
+  const stripTx = useRef(new Animated.Value(0)).current;
   const fade = useRef(new Animated.Value(1)).current;
   const busy = useRef(false);
 
@@ -103,6 +127,12 @@ function useCarousel(
   pullOk.current = allowPull;
   const dragStart = useRef(onDragStart);
   dragStart.current = onDragStart;
+  const stripAll = useRef(stripLive);
+  stripAll.current = stripLive;
+  const stripNext = useRef(stripStep);
+  stripNext.current = stripStep;
+  /** Set when a commit already slid the strip, so the week-change effect skips it. */
+  const stripHandled = useRef(false);
 
   type Tap = { t: number; x: number; y: number };
   const lastTap = useRef<{ primary: Tap; alt: Tap }>({
@@ -125,7 +155,7 @@ function useCarousel(
     const now = Date.now();
     const near = Math.abs(pageX - prev.x) < 44 && Math.abs(pageY - prev.y) < 44;
 
-    if (!moved.current && prev.t && now - prev.t < 250 && near) {
+    if (!moved.current && prev.t && now - prev.t < DOUBLE_TAP_MS && near) {
       reset();
       (which === 'primary' ? dblPrimary : dblAlt).current();
       return;
@@ -137,24 +167,45 @@ function useCarousel(
   const modeRef = useRef(mode);
   modeRef.current = mode;
 
-  const settle = () =>
+  const settle = () => {
     Animated.spring(tx, { toValue: 0, useNativeDriver: true, bounciness: 6 }).start();
+    Animated.spring(stripTx, { toValue: 0, useNativeDriver: true, bounciness: 6 }).start();
+  };
 
   /**
    * Kept in a ref, not a useCallback: the PanResponders are created once, so a
    * captured callback would freeze whichever animation mode was set at mount.
    */
   const runId = useRef(0);
-  const commitRef = useRef<(dir: 1 | -1, step: (d: 1 | -1) => void) => void>(() => {});
-  commitRef.current = (dir, step) => {
+  /**
+   * `step()` only re-renders on React's next commit, while Animated values move
+   * immediately. Springing the page back in right after calling it therefore
+   * animates the *old* content for a frame — visible as the previous day
+   * flashing past on fast swipes. So the incoming animation is parked here and
+   * started from a layout effect, once the new content is on screen.
+   */
+  const afterRender = useRef<(() => void) | null>(null);
+  const [renderGen, setRenderGen] = useState(0);
+  useLayoutEffect(() => {
+    const run = afterRender.current;
+    if (!run) return;
+    afterRender.current = null;
+    run();
+  }, [renderGen]);
+  const commitRef = useRef<(dir: 1 | -1, step: (d: 1 | -1) => void, withStrip?: boolean) => void>(
+    () => {},
+  );
+  commitRef.current = (dir, step, withStrip = false) => {
     // a new swipe interrupts whatever is still running instead of being ignored
     tx.stopAnimation();
+    stripTx.stopAnimation();
     fade.stopAnimation();
     const id = ++runId.current;
     const m = modeRef.current;
 
     if (m === 'none') {
       tx.setValue(0);
+      stripTx.setValue(0);
       fade.setValue(1);
       step(dir);
       return;
@@ -163,6 +214,7 @@ function useCarousel(
     if (m === 'fade') {
       busy.current = true;
       tx.setValue(0);
+      stripTx.setValue(0);
       Animated.timing(fade, {
         toValue: 0,
         duration: 90,
@@ -176,46 +228,81 @@ function useCarousel(
           return;
         }
         step(dir);
-        Animated.timing(fade, {
-          toValue: 1,
-          duration: 130,
-          easing: Easing.out(Easing.quad),
-          useNativeDriver: true,
-        }).start(() => {
-          if (id === runId.current) busy.current = false;
-        });
+        afterRender.current = () => {
+          Animated.timing(fade, {
+            toValue: 1,
+            duration: 130,
+            easing: Easing.out(Easing.quad),
+            useNativeDriver: true,
+          }).start(() => {
+            if (id === runId.current) busy.current = false;
+          });
+        };
+        setRenderGen((g) => g + 1);
       });
       return;
     }
 
     // slide: a full screen out, swap, spring the new one in
     busy.current = true;
-    Animated.timing(tx, {
-      toValue: -dir * SCREEN_W,
-      duration: 130,
-      useNativeDriver: true,
-    }).start(({ finished }) => {
+    if (withStrip) stripHandled.current = true;
+    const targets = withStrip ? [tx, stripTx] : [tx];
+    Animated.parallel(
+      targets.map((v) =>
+        Animated.timing(v, {
+          toValue: -dir * SCREEN_W,
+          duration: 130,
+          useNativeDriver: true,
+        }),
+      ),
+    ).start(({ finished }) => {
       if (id !== runId.current) return;
       if (!finished) {
-        tx.setValue(0);
+        targets.forEach((v) => v.setValue(0));
         busy.current = false;
         return;
       }
       step(dir);
-      tx.setValue(dir * SCREEN_W);
-      Animated.spring(tx, {
+      targets.forEach((v) => v.setValue(dir * SCREEN_W));
+      afterRender.current = () => {
+        if (id !== runId.current) return;
+        Animated.parallel(
+          targets.map((v) =>
+            Animated.spring(v, { toValue: 0, useNativeDriver: true, bounciness: 3, speed: 18 }),
+          ),
+        ).start(() => {
+          if (id === runId.current) busy.current = false;
+        });
+      };
+      setRenderGen((g) => g + 1);
+    });
+  };
+
+  const go = useCallback(
+    (dir: 1 | -1) => commitRef.current(dir, primary.current, stripNext.current('primary', dir)),
+    [],
+  );
+  const goAlt = useCallback((dir: 1 | -1) => commitRef.current(dir, alt.current, true), []);
+
+  /**
+   * Slide the strip in on its own — used when the week changed without the
+   * gesture knowing it would (a day swipe crossing Fri → Mon, the calendar,
+   * the jump to today).
+   */
+  const bumpStrip = useCallback(
+    (dir: 1 | -1) => {
+      if (modeRef.current !== 'slide') return;
+      stripTx.stopAnimation();
+      stripTx.setValue(dir * SCREEN_W);
+      Animated.spring(stripTx, {
         toValue: 0,
         useNativeDriver: true,
         bounciness: 3,
         speed: 18,
-      }).start(() => {
-        if (id === runId.current) busy.current = false;
-      });
-    });
-  };
-
-  const go = useCallback((dir: 1 | -1) => commitRef.current(dir, primary.current), []);
-  const goAlt = useCallback((dir: 1 | -1) => commitRef.current(dir, alt.current), []);
+      }).start();
+    },
+    [stripTx],
+  );
 
   const horizontal = (g: { dx: number; dy: number }) =>
     Math.abs(g.dx) > 14 && Math.abs(g.dx) > Math.abs(g.dy) * 1.4;
@@ -233,13 +320,19 @@ function useCarousel(
         horizontal(g) || (which === 'primary' && pullOk.current && pullingDown(g)),
       onPanResponderGrant: () => {
         tx.stopAnimation();
+        stripTx.stopAnimation();
         fade.stopAnimation();
         fade.setValue(1);
       },
       onPanResponderMove: (_, g) => {
         if (!moved.current) dragStart.current();
         moved.current = true;
-        if (modeRef.current === 'slide') tx.setValue(g.dx * 0.55);
+        if (modeRef.current === 'slide') {
+          tx.setValue(g.dx * 0.55);
+          // the strip only follows the finger where that is certain up front
+          if (stripAll.current(which)) stripTx.setValue(g.dx * 0.55);
+          else stripTx.setValue(0);
+        }
       },
       onPanResponderRelease: (_, g) => {
         if (which === 'primary' && pullOk.current && g.dy > 80 && g.dy > Math.abs(g.dx)) {
@@ -248,7 +341,14 @@ function useCarousel(
           return;
         }
         if (Math.abs(g.dx) > 45 || Math.abs(g.vx) > 0.4) {
-          commitRef.current(g.dx < 0 ? 1 : -1, which === 'primary' ? primary.current : alt.current);
+          const dir = g.dx < 0 ? 1 : -1;
+          const withStrip = stripNext.current(which, dir);
+          // the strip wasn't following the finger but is about to move: start it
+          // from where the timetable is, so the two travel as one
+          if (withStrip && !stripAll.current(which) && modeRef.current === 'slide') {
+            stripTx.setValue(g.dx * 0.55);
+          }
+          commitRef.current(dir, which === 'primary' ? primary.current : alt.current, withStrip);
         } else settle();
       },
       onPanResponderTerminate: settle,
@@ -259,11 +359,24 @@ function useCarousel(
 
   const recenter = useCallback(() => tx.setValue(0), [tx]);
 
-  return { tx, fade, go, goAlt, drag, altDrag, recenter };
+  return { tx, stripTx, fade, go, goAlt, drag, altDrag, recenter, bumpStrip, stripHandled };
 }
 
-export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: () => void }) {
+export default function TimetableScreen({
+  onOpenSettings,
+  onOpenSchool,
+  jumpTo,
+  onJumped,
+}: {
+  onOpenSettings: () => void;
+  onOpenSchool: () => void;
+  /** ISO date to show, set when something outside the timetable asks for a day. */
+  jumpTo: string | null;
+  onJumped: () => void;
+}) {
   const { settings, theme, t, update } = useSettings();
+  const { account } = useAccount();
+  const { load: loadSchool, loadAll: loadSchoolAll, clear: clearSchool } = useSchoolData();
   const [date, setDate] = useState(() => skipWeekend(new Date()));
   const [view, setView] = useState<'day' | 'week'>(settings.defaultView);
   const [cache, setCache] = useState<WeekCache>({});
@@ -272,6 +385,8 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
   const [group, setGroup] = useState(0); // 0 = all parallel groups
   const [, setTick] = useState(0); // re-render each minute so the now-line moves
   const [pickerOpen, setPickerOpen] = useState(false);
+  const titleTapAt = useRef(0);
+  const titleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sheet, setSheet] = useState<{ lesson: Lesson; date: string } | null>(null);
   const sheetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -281,14 +396,19 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
   cacheRef.current = cache;
   dateRef.current = date;
 
-  const client = useMemo(
-    () =>
-      new UntisClient(
-        { host: settings.host, school: settings.school },
-        new AnonymousAuth(settings.school),
-      ),
-    [settings.host, settings.school],
-  );
+  const client = useMemo(() => {
+    if (account) {
+      const auth: UntisAuth =
+        account.method === 'password'
+          ? new PasswordAuth(account.host, account.school, account.user, account.password!)
+          : new SessionAuth(account.host, account.school, account.user, account.secret!);
+      return new UntisClient({ host: account.host, school: account.school }, auth);
+    }
+    return new UntisClient(
+      { host: settings.host, school: settings.school },
+      new AnonymousAuth(settings.school),
+    );
+  }, [account, settings.host, settings.school]);
 
   const weekStart = useMemo(() => startOfWeek(date), [date]);
   const weekKey = iso(weekStart);
@@ -312,7 +432,9 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
         const res = await client.timetable({
           start: key,
           end: iso(addDays(ws, 5)),
-          resourceId: settings.classId,
+          resourceId: account ? account.studentId ?? account.personId : settings.classId,
+          resourceType: account ? resourceTypeForPerson(account.personType) : 'CLASS',
+          timetableType: account ? 'MY_TIMETABLE' : 'STANDARD',
         });
         setCache((c) => ({ ...c, [key]: res.days ?? [] }));
       } catch (e: any) {
@@ -322,7 +444,7 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
         if (isCurrent) setLoading(false);
       }
     },
-    [client, settings.classId, t.loadError],
+    [client, account, settings.classId, t.loadError],
   );
 
   const refresh = useCallback(() => {
@@ -333,6 +455,63 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
     const id = setInterval(() => setTick((n) => n + 1), 60_000);
     return () => clearInterval(id);
   }, []);
+
+  // opening an exam from the School screen lands on its day
+  useEffect(() => {
+    if (!jumpTo) return;
+    const [y, m, d] = jumpTo.split('-').map(Number);
+    setDate(new Date(y, m - 1, d));
+    onJumped();
+  }, [jumpTo, onJumped]);
+
+  /**
+   * Exams get a reminder of their own, without the user having to open the
+   * School screen. Reminders the user has edited are left untouched.
+   */
+  // held in refs: `update` gets a new identity on every settings change, and a
+  // dependency on it would re-fetch exams each time any setting is touched
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const updateRef = useRef(update);
+  updateRef.current = update;
+  useEffect(() => {
+    if (!account) return;
+    let dropped = false;
+    (async () => {
+      try {
+        // goes through the shared cache, so the School screen opens instantly
+        const exams = await loadSchool('exams', client, account);
+        if (dropped || !exams) return;
+        const next = await syncExamReminders(exams, settingsRef.current);
+        if (next && !dropped) updateRef.current({ reminders: next });
+      } catch {
+        // no exams / offline — nothing to sync, try again next launch
+      }
+      // the rest can warm up quietly once the timetable itself is up
+      if (!dropped) setTimeout(() => loadSchoolAll(client, account), 1500);
+    })();
+    return () => {
+      dropped = true;
+    };
+  }, [
+    account,
+    client,
+    loadSchool,
+    loadSchoolAll,
+    settings.autoExamReminders,
+    (settings.autoExamDays ?? []).join(','),
+    settings.reminderHour,
+  ]);
+
+  // a different account must not show the previous one's lists. Skips the first
+  // run: on mount there is nothing to clear, and wiping then would throw away
+  // the bookkeeping for the preload that has just started.
+  const lastPerson = useRef<number | null | undefined>(undefined);
+  useEffect(() => {
+    const id = account?.personId ?? null;
+    if (lastPerson.current !== undefined && lastPerson.current !== id) clearSchool();
+    lastPerson.current = id;
+  }, [account?.personId, clearSchool]);
 
   // coming back from the background lands on today again
   useEffect(() => {
@@ -346,7 +525,7 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
 
   useEffect(() => {
     setCache({});
-  }, [settings.classId, settings.host, settings.school]);
+  }, [settings.classId, settings.host, settings.school, account?.personId]);
 
   // this week first, the neighbours right after, so a swipe already has data
   useEffect(() => {
@@ -428,17 +607,25 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
       sheetTimer.current = setTimeout(() => {
         sheetTimer.current = null;
         setSheet({ lesson, date: dayIso });
-      }, 270);
+      }, DOUBLE_TAP_MS);
     },
     [cancelSheet],
   );
 
   useEffect(() => cancelSheet, [cancelSheet]);
 
+  useEffect(
+    () => () => {
+      if (titleTimer.current) clearTimeout(titleTimer.current);
+    },
+    [],
+  );
+
   const car = useCarousel(
     (dir) => (viewRef.current === 'week' ? stepWeek(dir) : stepDay(dir)),
     stepWeek,
-    settings.swipeAnim,
+    // slide is the only transition now; older saved settings may still say fade
+    'slide',
     () => {
       cancelSheet();
       setView((v) => (v === 'day' ? 'week' : 'day'));
@@ -450,7 +637,34 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
     refresh,
     view === 'week' || settings.fitToScreen,
     cancelSheet,
+    // the strip follows the finger only on its own drag and in week view; a day
+    // swipe that crosses into another week is animated by the effect below
+    // only the strip's own drag follows the finger; a swipe on the timetable
+    // leaves the strip still until it is released
+    (which) => which === 'alt',
+    // does the step about to happen land in another week?
+    (which, dir) => {
+      if (which === 'alt' || viewRef.current === 'week') return true;
+      const next = skipWeekend(addDays(dateRef.current, dir), dir);
+      return iso(startOfWeek(next)) !== iso(startOfWeek(dateRef.current));
+    },
   );
+
+  /**
+   * Whenever the shown week actually changes, slide the strip — unless the
+   * swipe that caused it already dragged the strip along.
+   */
+  const lastWeekKey = useRef(weekKey);
+  useEffect(() => {
+    if (lastWeekKey.current === weekKey) return;
+    const dir: 1 | -1 = weekKey > lastWeekKey.current ? 1 : -1;
+    lastWeekKey.current = weekKey;
+    if (car.stripHandled.current) {
+      car.stripHandled.current = false;
+      return;
+    }
+    car.bumpStrip(dir);
+  }, [weekKey]);
 
   const s = makeStyles(theme);
 
@@ -458,7 +672,27 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
    * The calendar opens on the first tap with no delay; a second tap landing
    * during the opening animation cancels it and jumps to today instead.
    */
-  const onTitlePress = () => setPickerOpen(true);
+  const onTitlePress = () => {
+    const now = Date.now();
+    // second tap: cancel the pending calendar and jump to today instead, so it
+    // never flashes open on a double-tap
+    if (now - titleTapAt.current < 420) {
+      titleTapAt.current = 0;
+      if (titleTimer.current) {
+        clearTimeout(titleTimer.current);
+        titleTimer.current = null;
+      }
+      setPickerOpen(false);
+      setDate(skipWeekend(new Date()));
+      return;
+    }
+    titleTapAt.current = now;
+    if (titleTimer.current) clearTimeout(titleTimer.current);
+    titleTimer.current = setTimeout(() => {
+      titleTimer.current = null;
+      setPickerOpen(true);
+    }, 50);
+  };
 
   /* ---------------- one day page ---------------- */
 
@@ -467,9 +701,9 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
       buildDayGrid(
         filterGroup(lessonsFor(daysFor(d).find((x) => x.date === iso(d))), group),
         settings.periods,
-        settings.mergeBlocks,
+        settings.mergeDay,
         group > 0,
-        settings.mergeIdentical,
+        settings.mergeDay,
         !settings.showAllPeriods,
       ),
     [
@@ -477,15 +711,14 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
       lessonsFor,
       group,
       settings.periods,
-      settings.mergeBlocks,
-      settings.mergeIdentical,
+      settings.mergeDay,
       settings.showAllPeriods,
     ],
   );
 
   const grid = gridFor(date);
 
-  const DayPage = ({ d, fit }: { d: Date; fit: boolean }) => {
+  const renderDayPage = (d: Date, fit: boolean) => {
     const g = gridFor(d);
     const total = g.last - g.first + 1;
     const isToday = isSameDay(d, new Date());
@@ -499,8 +732,14 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
     });
 
     return (
-      <View style={[s.dayWrap, fit ? { flex: 1 } : { height: Math.max(1, total) * PERIOD_H }]}>
-        <View style={s.rowTime}>
+      <View
+        style={[
+          s.dayWrap,
+          settings.alignedDayBar && s.dayWrapAligned,
+          fit ? { flex: 1 } : { height: Math.max(1, total) * PERIOD_H },
+        ]}
+      >
+        <View style={[s.rowTime, settings.alignedDayBar && s.rowTimeAligned]}>
           {Array.from({ length: Math.max(0, total) }, (_, i) => g.first + i).map((pi) => {
             const p = settings.periods[pi];
             const now = isToday && n >= toMinutes(p.start) && n <= toMinutes(p.end);
@@ -549,9 +788,13 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
                       dense={b.cSpan < g.cols}
                       progress={progress}
                       past={settings.dimPast && isToday && n > to}
+                      hideGroupLabel={group > 0}
                       badge={
                         findReminder(settings.reminders, iso(d), b.lesson)
-                          ? KIND_ICON[findReminder(settings.reminders, iso(d), b.lesson)!.kind]
+                          ? kindIcon(
+                              findReminder(settings.reminders, iso(d), b.lesson)!.kind,
+                              settings.minimalIcons,
+                            )
                           : null
                       }
                     />
@@ -603,19 +846,19 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
     const d = offset === 0 ? date : skipWeekend(addDays(date, offset), offset > 0 ? 1 : -1);
     if (settings.fitToScreen) {
       return (
-        <View style={s.fitWrap}>
-          <DayPage d={d} fit />
+        <View style={[s.fitWrap, settings.alignedDayBar && s.pageAligned]}>
+          {renderDayPage(d, true)}
         </View>
       );
     }
     return (
       <ScrollView
-        contentContainerStyle={s.list}
+        contentContainerStyle={[s.list, settings.alignedDayBar && s.pageAligned]}
         refreshControl={
           <RefreshControl refreshing={loading} onRefresh={refresh} tintColor={theme.accent} />
         }
       >
-        <DayPage d={d} fit={false} />
+        {renderDayPage(d, false)}
       </ScrollView>
     );
   };
@@ -623,7 +866,7 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
   return (
     <View style={s.root}>
       {/* Header */}
-      <View style={s.header}>
+      <View style={[s.header, settings.alignedDayBar && s.headerAligned]}>
         {/* tap the title for the calendar, double-tap it to jump to today */}
         <Pressable style={{ flex: 1 }} onPress={onTitlePress}>
           <Text style={s.title}>
@@ -633,12 +876,20 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
             {formatDate(date, settings.lang)} · {settings.className}
           </Text>
         </Pressable>
-        <Pressable
-          onPress={() => setView(view === 'day' ? 'week' : 'day')}
-          style={[s.iconBtn, s.viewBtn]}
-        >
-          <Text style={[s.iconTxt, s.viewTxt]}>{view === 'day' ? t.viewDay : t.viewWeek}</Text>
-        </Pressable>
+        {!!account && (
+          <Pressable
+            onPress={onOpenSchool}
+            style={[
+              s.iconBtn,
+              s.schoolBtn,
+              { backgroundColor: theme.accent, borderColor: theme.accent },
+            ]}
+          >
+            <Text style={[s.iconTxt, { color: theme.accentText, fontWeight: '800' }]}>
+              {t.sectionSchoolData}
+            </Text>
+          </Pressable>
+        )}
         {weekHasGroups && (
           <Pressable
             onPress={() => setGroup((g) => (g + 1) % 3)}
@@ -658,7 +909,14 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
       </View>
 
       {/* Day strip — swiping here moves a whole week */}
-      <View style={s.strip} {...car.altDrag.panHandlers}>
+      <Animated.View
+        style={[
+          s.strip,
+          settings.alignedDayBar ? s.stripAligned : s.stripWide,
+          { transform: [{ translateX: car.stripTx }] },
+        ]}
+        {...car.altDrag.panHandlers}
+      >
         {weekDays.map((d) => {
           const active = isSameDay(d, date) && view === 'day';
           const today = isSameDay(d, new Date());
@@ -666,10 +924,18 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
             <Pressable
               key={iso(d)}
               onPress={() => {
-                setDate(d);
-                setView('day');
+                if (active) {
+                  setView('week');
+                } else {
+                  setDate(d);
+                  setView('day');
+                }
               }}
-              style={[s.chip, active && { backgroundColor: theme.accent }]}
+              style={[
+                s.chip,
+                settings.alignedDayBar && s.chipAligned,
+                active && { backgroundColor: theme.accent },
+              ]}
             >
               <Text style={[s.chipDay, active && { color: theme.accentText }]}>
                 {dayShort(d, settings.lang)}
@@ -686,17 +952,7 @@ export default function TimetableScreen({ onOpenSettings }: { onOpenSettings: ()
             </Pressable>
           );
         })}
-      </View>
-
-      {/* Week nav */}
-      <View style={s.nav}>
-        <Pressable onPress={() => car.goAlt(-1)} style={s.navBtn}>
-          <Text style={s.navTxt}>{t.prevWeek}</Text>
-        </Pressable>
-        <Pressable onPress={() => car.goAlt(1)} style={s.navBtn}>
-          <Text style={s.navTxt}>{t.nextWeek}</Text>
-        </Pressable>
-      </View>
+      </Animated.View>
 
       {sheet && (
         <LessonSheet lesson={sheet.lesson} date={sheet.date} onClose={() => setSheet(null)} />
@@ -812,9 +1068,7 @@ function WeekGrid({
   const cellKey = (ls: Lesson[]) =>
     ls
       .map((l) =>
-        settings.mergeIdentical
-          ? `${l.subject}|${l.status}|${l.teachers.join(',')}|${l.rooms.join(',')}|${l.groupLabel ?? ''}`
-          : l.id,
+        `${l.subject}|${l.status}|${l.teachers.join(',')}|${l.rooms.join(',')}|${l.groupLabel ?? ''}`,
       )
       .join('#');
   const sameAsAbove = (col: Lesson[][], i: number) =>
@@ -826,77 +1080,114 @@ function WeekGrid({
   const nowColor = settings.nowLineColor ?? theme.accent;
   const nowMin = nowMinutes();
 
+  /** Runs of consecutive periods that show the same thing, so they can merge. */
+  const runsFor = (col: Lesson[][]) => {
+    const out: { from: number; span: number; cell: Lesson[] }[] = [];
+    for (const i of periodIdx) {
+      const prev = out[out.length - 1];
+      const key = cellKey(col[i]);
+      const canMerge =
+        settings.weekMerge &&
+        prev &&
+        prev.from + prev.span === i &&
+        col[i].length > 0 &&
+        cellKey(col[prev.from]) === key;
+      if (canMerge && prev) prev.span += 1;
+      else out.push({ from: i, span: 1, cell: col[i] });
+    }
+    return out;
+  };
+
   return (
     <View style={g.wrap}>
-      <View style={g.headRow}>
-        <View style={g.timeCol} />
-        {days.map((d) => {
-          const isToday = isSameDay(d, today);
-          return (
-            <Pressable key={iso(d)} style={g.headCell} onPress={() => onPickDay(d)}>
-              <Text style={[g.headDay, isToday && { color: theme.accent }]}>
-                {dayShort(d, settings.lang)}
-              </Text>
-              <Text style={[g.headNum, isToday && { color: theme.accent }]}>{d.getDate()}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
-
-      <View style={{ flex: 1 }}>
-      {periodIdx.map((i) => (
-        <View key={i} style={g.row}>
-          <View style={g.timeCol}>
-            <Text style={g.timeNum}>{settings.periods[i].label}</Text>
-            <Text style={g.timeTxt}>{settings.periods[i].start}</Text>
-          </View>
-          {grid.map((col, di) => {
-            const cell = col[i];
-            const cont = sameAsAbove(col, i);
+      {/* with an aligned day bar the strip above already labels the columns */}
+      {!settings.alignedDayBar && (
+        <View style={g.headRow}>
+          <View style={g.timeCol} />
+          {days.map((d) => {
+            const isToday = isSameDay(d, today);
             return (
-              <View key={di} style={g.cellWrap}>
-                {cell.length === 0 ? (
-                  <View style={g.cellEmpty} />
-                ) : (
-                  <View style={g.cellRow}>
-                    {weekBoxes(cell, group > 0).map((l, bi) => {
-                      if (!l) return <View key={`gap${bi}`} style={g.cellEmpty} />;
-                      const skin = cardSkin(l, theme, settings);
-                      return (
-                        <Pressable
-                          key={l.id}
-                          onPress={() => onPickLesson(l, iso(days[di]))}
-                          style={[
-                            g.cell,
-                            {
-                              backgroundColor: skin.background,
-                              borderColor: skin.border,
-                              borderWidth: skin.borderWidth,
-                              opacity:
-                                (l.cancelled ? 0.5 : 1) *
-                                (settings.dimPast &&
-                                isSameDay(days[di], today) &&
-                                nowMin > toMinutes(settings.periods[i].end)
-                                  ? 0.45
-                                  : 1),
-                            },
-                            // a continuing lesson keeps the colour but drops the label
-                            cont && g.cellCont,
-                          ]}
-                        >
-                          {skin.stripe > 0 && (
-                            <View
-                              style={[g.cellStripe, { backgroundColor: skin.stripeColor }]}
-                            />
-                          )}
-                          <View style={g.cellBody}>
-                            <View style={g.cellTop}>
+              <Pressable key={iso(d)} style={g.headCell} onPress={() => onPickDay(d)}>
+                <Text style={[g.headDay, isToday && { color: theme.accent }]}>
+                  {dayShort(d, settings.lang)}
+                </Text>
+                <Text style={[g.headNum, isToday && { color: theme.accent }]}>{d.getDate()}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      )}
+
+      <View
+        style={[
+          g.body,
+          settings.alignedDayBar && {
+            flex: 0,
+            height: periodIdx.length * settings.weekRowHeight,
+          },
+        ]}
+      >
+        <View style={g.timeCol}>
+          {periodIdx.map((i) => (
+            <View key={i} style={g.timeCell}>
+              <Text style={g.timeNum}>{settings.periods[i].label}</Text>
+              <Text style={g.timeTxt}>{settings.periods[i].start}</Text>
+            </View>
+          ))}
+        </View>
+
+        {grid.map((col, di) => (
+          <View key={di} style={g.dayCol}>
+            {runsFor(col).map((run) => {
+              const past =
+                settings.dimPast &&
+                isSameDay(days[di], today) &&
+                nowMin > toMinutes(settings.periods[run.from + run.span - 1].end);
+
+              return (
+                <View
+                  key={run.from}
+                  style={[
+                    g.runWrap,
+                    {
+                      top: `${((run.from - first) / periodIdx.length) * 100}%`,
+                      height: `${(run.span / periodIdx.length) * 100}%`,
+                    },
+                  ]}
+                >
+                  {run.cell.length === 0 ? (
+                    <View style={g.cellEmpty} />
+                  ) : (
+                    <View style={g.cellRow}>
+                      {weekBoxes(run.cell, group > 0).map((l, bi) => {
+                        if (!l) return <View key={`gap${bi}`} style={g.cellEmpty} />;
+                        const skin = cardSkin(l, theme, settings);
+                        const reminder = findReminder(settings.reminders, iso(days[di]), l);
+                        return (
+                          <View key={l.id} style={{ flex: 1 }}>
+                          <Pressable
+                            onPress={() => onPickLesson(l, iso(days[di]))}
+                            style={[
+                              g.cell,
+                              {
+                                backgroundColor: skin.background,
+                                borderColor: skin.border,
+                                borderWidth: skin.borderWidth,
+                                opacity: (l.cancelled ? 0.5 : 1) * (past ? 0.45 : 1),
+                              },
+                            ]}
+                          >
+                            {skin.stripe > 0 && (
+                              <View style={[g.cellStripe, { backgroundColor: skin.stripeColor }]} />
+                            )}
+                            <View style={g.cellBody}>
                               {!!fieldText(l, settings, wf.main, 'week') && (
                                 <Text
                                   style={[
                                     g.cellSubject,
                                     {
-                                      color: skin.text,
+                                      fontSize: settings.weekMainSize,
+                                      color: pickTextColor(settings.textColorMain, skin.text),
                                       textDecorationLine: l.cancelled ? 'line-through' : 'none',
                                     },
                                   ]}
@@ -905,46 +1196,60 @@ function WeekGrid({
                                   {fieldText(l, settings, wf.main, 'week')}
                                 </Text>
                               )}
-                              {!!fieldText(l, settings, wf.right, 'week') && (
+                              {!!fieldText(l, settings, wf.sub, 'week') && (
                                 <Text
-                                  style={[g.cellRoom, { color: skin.dim }]}
+                                  style={[
+                                    g.cellRoom,
+                                    {
+                                      fontSize: settings.weekSubSize,
+                                      color: pickTextColor(settings.textColorSub, skin.dim),
+                                    },
+                                  ]}
                                   numberOfLines={1}
                                 >
-                                  {fieldText(l, settings, wf.right, 'week')}
+                                  {fieldText(l, settings, wf.sub, 'week')}
+                                </Text>
+                              )}
+                              {!!reminder && (
+                                <Text
+                                  style={[
+                                    g.cellBadge,
+                                    {
+                                      fontSize: Math.max(
+                                        7,
+                                        Math.round(settings.badgeSize * 0.7),
+                                      ),
+                                    },
+                                  ]}
+                                >
+                                  {kindIcon(reminder.kind, settings.minimalIcons)}
                                 </Text>
                               )}
                             </View>
-                            {!!fieldText(l, settings, wf.sub, 'week') && (
-                              <Text style={[g.cellRoom, { color: skin.dim }]} numberOfLines={1}>
-                                {fieldText(l, settings, wf.sub, 'week')}
-                              </Text>
-                            )}
-                            {!!findReminder(settings.reminders, iso(days[di]), l) && (
-                              <Text
-                                style={[
-                                  g.cellBadge,
-                                  { fontSize: Math.max(7, Math.round(settings.badgeSize * 0.7)) },
-                                ]}
-                              >
-                                {
-                                  KIND_ICON[
-                                    findReminder(settings.reminders, iso(days[di]), l)!.kind
-                                  ]
-                                }
-                              </Text>
-                            )}
-
+                          </Pressable>
+                          {subjectFlagList(settings, l.subject).length > 0 && (
+                            <View pointerEvents="none" style={g.cellFlag}>
+                              {subjectFlagList(settings, l.subject).map((f) => (
+                                <StickyNote
+                                  key={f}
+                                  color={f}
+                                  size={Math.max(9, Math.round(settings.weekMainSize * 1.05))}
+                                  bg={skin.background}
+                                  notch={false}
+                                />
+                              ))}
+                            </View>
+                          )}
                           </View>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                )}
-              </View>
-            );
-          })}
-        </View>
-      ))}
+                        );
+                      })}
+                    </View>
+                  )}
+                </View>
+              );
+            })}
+          </View>
+        ))}
 
         {settings.nowLine && nowF !== null && (
           <View pointerEvents="none" style={[g.nowLine, { top: `${nowF * 100}%` }]}>
@@ -969,6 +1274,8 @@ const makeStyles = (t: Theme) =>
       paddingBottom: 10,
       gap: 6,
     },
+    /** Flush with the day bar: its 34px time-column indent plus 2 + 2 padding. */
+    headerAligned: { paddingLeft: 38, paddingRight: 4 },
     title: { color: t.text, fontSize: 24, fontWeight: '800' },
     subtitle: { color: t.textDim, fontSize: 12, marginTop: 1 },
     iconBtn: {
@@ -993,7 +1300,21 @@ const makeStyles = (t: Theme) =>
       borderRadius: 12,
     },
     viewTxt: { fontWeight: '800', color: t.accent },
-    strip: { flexDirection: 'row', paddingHorizontal: 10, gap: 5 },
+    schoolBtn: { minWidth: 78, alignItems: 'center', justifyContent: 'center' },
+    strip: { flexDirection: 'row', marginBottom: 8 },
+    /** The original bar: full width, evenly spaced, its own row in the grid. */
+    stripWide: { paddingHorizontal: 10, gap: 5 },
+    /**
+     * Aligned bar: grid geometry — wrap padding 3 + the 34px time column, and
+     * the 2px each side that every cell already carries — so a chip lands
+     * square on top of its column. Day view uses the same metrics, so the chips
+     * keep one size across both views.
+     */
+    // unlike headerAligned, each chip below still adds its own GAP margin — so
+    // this padding stops at the column edge itself (PAD+TIME / PAD) and lets
+    // the chip's margin supply the same GAP inset the grid's cards use
+    stripAligned: { paddingLeft: 36, paddingRight: 2 },
+    chipAligned: { marginHorizontal: 2 },
     chip: {
       flex: 1,
       alignItems: 'center',
@@ -1003,18 +1324,14 @@ const makeStyles = (t: Theme) =>
     },
     chipDay: { color: t.textDim, fontSize: 10, fontWeight: '700' },
     chipNum: { color: t.text, fontSize: 15, fontWeight: '700' },
-    nav: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      paddingHorizontal: 14,
-      paddingVertical: 8,
-    },
-    navBtn: { paddingVertical: 2 },
-    navTxt: { color: t.textDim, fontSize: 11, fontWeight: '600' },
     fitWrap: { flex: 1, paddingHorizontal: 10, paddingBottom: 8, gap: 4 },
     list: { paddingHorizontal: 10, paddingBottom: 24 },
+    /** Same edges as the day bar, so the cards line up under the chips. */
+    pageAligned: { paddingLeft: 2, paddingRight: 4 },
     row: { flexDirection: 'row', gap: 8 },
     dayWrap: { flexDirection: 'row', gap: 6 },
+    // 2 (page) + 34 (times) + 2 (gap) = the day bar's 38px left edge
+    dayWrapAligned: { gap: 2 },
     nowLine: {
       position: 'absolute',
       left: -6,
@@ -1026,8 +1343,9 @@ const makeStyles = (t: Theme) =>
     nowDot: { width: 8, height: 8, borderRadius: 4 },
     nowBar: { flex: 1, height: 2, borderRadius: 1 },
     rowTime: { width: 46 },
+    rowTimeAligned: { width: 34 },
     rowTimeCell: { alignItems: 'flex-end', justifyContent: 'center' },
-    rowNum: { color: t.textDim, fontSize: 13, fontWeight: '800' },
+    rowNum: { color: t.textDim, fontSize: 15, fontWeight: '800' },
     rowStart: { color: t.text, fontSize: 11, fontWeight: '600' },
     rowEnd: { color: t.textDim, fontSize: 10 },
     rowBody: { flex: 1, gap: 4 },
@@ -1068,17 +1386,32 @@ const makeStyles = (t: Theme) =>
 
 const makeGridStyles = (t: Theme) =>
   StyleSheet.create({
-    wrap: { flex: 1, paddingHorizontal: 8, paddingBottom: 8 },
+    // 3 here plus each cell's own 3px inset = the same 6px the cards keep
+    // between each other, so the grid breathes evenly right to the screen edge
+    // PAD=2 outer + each cell's own GAP=2 inset = a 4px gap at the screen edge
+    // too, matching the 4px every card keeps from its neighbours
+    wrap: { flex: 1, paddingHorizontal: 2, paddingBottom: 8 },
     headRow: { flexDirection: 'row', paddingBottom: 4 },
-    timeCol: { width: 34, alignItems: 'flex-end', paddingRight: 4, justifyContent: 'center' },
     headCell: { flex: 1, alignItems: 'center' },
     headDay: { color: t.textDim, fontSize: 10, fontWeight: '800' },
     headNum: { color: t.text, fontSize: 12, fontWeight: '700' },
-    row: { flex: 1, flexDirection: 'row' },
+    timeCol: { width: 34, alignItems: 'flex-end', paddingRight: 4, justifyContent: 'center' },
+    body: { flex: 1, flexDirection: 'row' },
+    dayCol: { flex: 1, position: 'relative' },
+    // flexBasis 0 makes a run's height come purely from its span — with the
+    // default auto basis the text inside a merged block counts as content and
+    // nudges its edges out of line with the single-period blocks beside it
+    /**
+     * Runs are placed by percentage rather than flex: a block spanning three
+     * periods then lands on exactly the same pixel row as three single blocks
+     * in the column next to it, whatever is inside them.
+     */
+    runWrap: { position: 'absolute', left: 0, right: 0, padding: 2 },
+    timeCell: { flex: 1, alignItems: 'flex-end', justifyContent: 'center', paddingRight: 4 },
     timeNum: { color: t.textDim, fontSize: 11, fontWeight: '800' },
     timeTxt: { color: t.textDim, fontSize: 8 },
     cellWrap: { flex: 1, padding: 1.5 },
-    cellRow: { flex: 1, flexDirection: 'row', gap: 1.5 },
+    cellRow: { flex: 1, flexDirection: 'row', gap: 2 },
     cell: {
       flex: 1,
       flexDirection: 'row',
@@ -1088,6 +1421,7 @@ const makeGridStyles = (t: Theme) =>
     },
     cellCont: { opacity: 0.85 },
     cellStripe: { width: 3 },
+    cellFlag: { position: 'absolute', top: 0, right: 8, zIndex: 6, flexDirection: 'row', gap: 2 },
     nowLine: {
       position: 'absolute',
       left: 26,
@@ -1099,9 +1433,8 @@ const makeGridStyles = (t: Theme) =>
     nowDot: { width: 7, height: 7, borderRadius: 3.5 },
     nowBar: { flex: 1, height: 2, borderRadius: 1 },
     cellBody: { flex: 1, justifyContent: 'center', paddingHorizontal: 3 },
-    cellTop: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 3 },
-    cellSubject: { fontSize: 11, fontWeight: '700' },
-    cellRoom: { fontSize: 8 },
+    cellSubject: { fontWeight: '700' },
+    cellRoom: {},
     cellBadge: { position: 'absolute', right: 1, bottom: 0 },
     cellEmpty: { flex: 1 },
     empty: { color: t.textDim, textAlign: 'center', marginTop: 40, fontSize: 15 },

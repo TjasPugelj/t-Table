@@ -338,9 +338,10 @@ export function buildDayGrid(
 export function filterGroup(lessons: Lesson[], group: number): Lesson[] {
   if (!group) return lessons;
   return lessons.filter((l) => {
-    // Untis prints the real group on the lesson ("1sk"); the layout column only
-    // says where it was drawn, and the two do not always agree
-    if (l.groupNo != null) return l.groupNo === group;
+    // Untis prints the real groups on the lesson ("1sk", or "1sk, 2sk" when both
+    // attend) where it bothers to; the layout column only says where it was drawn
+    if (l.groupNos.length) return l.groupNos.includes(group);
+    if (!groupSplit(l, lessons)) return true;
     const w = l.layoutWidth || 1000;
     if (w >= 1000) return true;
     const start = l.layoutStart || 0;
@@ -348,6 +349,31 @@ export function filterGroup(lessons: Lesson[], group: number): Lesson[] {
   });
 }
 
+/**
+ * Whether a half-width lesson is half-width because the class is genuinely
+ * split, or only because it shares the period with something else. Not every
+ * school tags its groups with a label ("1sk", a PE code) the way sc-celje
+ * does, so this no longer requires one — instead it looks at what else is
+ * actually happening at the exact same time: two or more real lessons at
+ * once means real, independent groups meeting in parallel.
+ *
+ * "Real" excludes EVENT-type entries specifically, because a substitution is
+ * drawn the same way a group split is — the cancelled original in one column,
+ * a one-off EVENT announcing the replacement in the other — and that pair
+ * would otherwise look identical to two groups each having their own class.
+ * A cancelled entry still counts on its own (one group's class being
+ * cancelled while the other group meets as usual is a real split too).
+ */
+const groupSplit = (l: Lesson, siblings: Lesson[]): boolean => {
+  if (l.type === 'EVENT') return false;
+  const concurrent = siblings.filter(
+    (o) => o.type !== 'EVENT' && o.startMin === l.startMin && o.endMin === l.endMin,
+  );
+  return concurrent.length > 1;
+};
+
 /** True when any lesson in the set belongs to a parallel group. */
 export const hasGroups = (lessons: Lesson[]): boolean =>
-  lessons.some((l) => l.groupNo != null || (l.layoutWidth || 1000) < 1000);
+  lessons.some(
+    (l) => l.groupNos.length > 0 || (groupSplit(l, lessons) && (l.layoutWidth || 1000) < 1000),
+  );

@@ -9,6 +9,7 @@ export type ReminderKind =
   | 'material'
   | 'note';
 
+/** The default set — colourful and instantly readable. */
 export const KIND_ICON: Record<ReminderKind, string> = {
   exam: '📕',
   test: '📝',
@@ -18,6 +19,24 @@ export const KIND_ICON: Record<ReminderKind, string> = {
   material: '🎒',
   note: '🔔',
 };
+
+/**
+ * Monochrome stand-ins for the same seven — a page, a ticked sheet, a pencil,
+ * tools, a quote mark for speaking, a packed box, a bell. Plain BMP symbols, so
+ * they take the card's own text colour instead of rendering as colour emoji.
+ */
+export const KIND_ICON_MIN: Record<ReminderKind, string> = {
+  exam: '▤',
+  test: '☑︎',
+  homework: '✎︎',
+  project: '⚒︎',
+  presentation: '❝',
+  material: '⊞',
+  note: '⍾',
+};
+
+export const kindIcon = (kind: ReminderKind, minimal: boolean) =>
+  (minimal ? KIND_ICON_MIN : KIND_ICON)[kind];
 
 export interface Reminder {
   id: string;
@@ -37,6 +56,12 @@ export interface Reminder {
   notify: boolean;
   /** OS notification ids, so they can be cancelled when the reminder changes. */
   scheduled: string[];
+  /**
+   * Created automatically from a WebUntis exam rather than by hand. Editing one
+   * in the lesson sheet clears the flag, so the user's version is never
+   * overwritten or removed by a later sync.
+   */
+  auto?: boolean;
 }
 
 /** Identifies the lesson a reminder belongs to. */

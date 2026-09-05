@@ -17,7 +17,7 @@ import { cancelScheduled, scheduleReminder } from '../lib/notify';
 import {
   DAY_OPTIONS,
   findReminder,
-  KIND_ICON,
+  kindIcon,
   MINUTE_OPTIONS,
   newId,
   Reminder,
@@ -25,7 +25,8 @@ import {
   reminderKey,
   lessonKey,
 } from '../lib/reminders';
-import { useSettings } from '../store/settings';
+import { subjectFlagList, subjectKey, useSettings } from '../store/settings';
+import StickyNote, { FLAG_COLORS } from './StickyNote';
 
 interface Props {
   lesson: Lesson | null;
@@ -95,7 +96,7 @@ export default function LessonSheet({ lesson, date, onClose }: Props) {
       notify,
       scheduled: existing?.scheduled ?? [],
     };
-    const scheduled = await scheduleReminder(base, settings.reminderHour);
+    const scheduled = await scheduleReminder(base, settings.reminderHour, settings.minimalIcons);
     const saved: Reminder = { ...base, scheduled };
     const rest = settings.reminders.filter((r) => reminderKey(r) !== lessonKey(date, lesson));
     update({ reminders: [...rest, saved] });
@@ -139,6 +140,54 @@ export default function LessonSheet({ lesson, date, onClose }: Props) {
               <Text style={[s.note, { color: theme.changed }]}>{lesson.substitutionText}</Text>
             )}
 
+            {/* ---- subject notes (shared by every lesson of this subject) ---- */}
+            <Text style={s.section}>
+              {t.subjectNotes} · {subjectKey(settings, lesson.subject)}
+            </Text>
+            <Text style={s.hint}>{t.subjectNotesHint}</Text>
+
+            <View style={[s.chips, { marginBottom: 8 }]}>
+              {(['red', 'yellow', 'green', 'blue'] as const).map((f) => {
+                const current = subjectFlagList(settings, lesson.subject);
+                const active = current.includes(f);
+                return (
+                  <Pressable
+                    key={f}
+                    onPress={() =>
+                      update({
+                        subjectFlags: {
+                          ...settings.subjectFlags,
+                          [subjectKey(settings, lesson.subject)]: active
+                            ? current.filter((x) => x !== f)
+                            : [...current, f],
+                        },
+                      })
+                    }
+                    style={[s.chip, active && { borderColor: theme.accent, borderWidth: 2 }]}
+                  >
+                    <StickyNote color={FLAG_COLORS[f]} size={20} bg={theme.surface} notch={false} />
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <TextInput
+              style={[s.input, { minHeight: 76 }]}
+              value={settings.subjectNotes[subjectKey(settings, lesson.subject)] ?? ''}
+              onChangeText={(v) =>
+                update({
+                  subjectNotes: {
+                    ...settings.subjectNotes,
+                    [subjectKey(settings, lesson.subject)]: v,
+                  },
+                })
+              }
+              placeholder={t.subjectNotesPlaceholder}
+              placeholderTextColor={theme.textDim}
+              multiline
+              textAlignVertical="top"
+            />
+
             {/* ---- reminder ---- */}
             <Text style={s.section}>{t.reminder}</Text>
 
@@ -151,7 +200,7 @@ export default function LessonSheet({ lesson, date, onClose }: Props) {
                   style={[s.chip, kind === k && { borderColor: theme.accent, borderWidth: 2 }]}
                 >
                   <Text style={s.chipTxt}>
-                    {KIND_ICON[k]} {kindLabel[k]}
+                    {kindIcon(k, settings.minimalIcons)} {kindLabel[k]}
                   </Text>
                 </Pressable>
               ))}
@@ -269,6 +318,7 @@ const makeStyles = (t: ReturnType<typeof useSettings>['theme']) =>
       marginTop: 18,
     },
     label: { color: t.textDim, fontSize: 12, fontWeight: '600', marginTop: 12, marginBottom: 6 },
+    hint: { color: t.textDim, fontSize: 11, marginTop: 4, marginBottom: 6 },
     chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
     chip: {
       paddingHorizontal: 10,

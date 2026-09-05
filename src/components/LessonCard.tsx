@@ -1,17 +1,25 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { Lesson } from '../api/types';
-import { cardSkin } from '../lib/colors';
-import { fieldText, NameVariant } from '../lib/display';
-import { Settings } from '../store/settings';
+import { cardSkin, pickTextColor } from '../lib/colors';
+import { fieldParts, FieldPart, fieldText, NameVariant } from '../lib/display';
+import { Settings, subjectFlagList } from '../store/settings';
+import StickyNote from './StickyNote';
 import { Theme } from '../theme';
 
-/** Substitution text and info chips often repeat each other — show each once. */
-export function lessonNote(lesson: Lesson): string {
+/**
+ * Substitution text and info chips often repeat each other — show each once.
+ * With a group filter on, the group tag ("2sk") is dropped: it is the same for
+ * every lesson on screen and only steals room from the subject.
+ */
+export function lessonNote(lesson: Lesson, hideGroup = false): string {
   const seen = new Set<string>();
+  const tag = (lesson.groupLabel ?? '').trim();
   for (const s of [lesson.substitutionText, ...lesson.info]) {
     const v = (s ?? '').trim();
-    if (v) seen.add(v);
+    if (!v) continue;
+    if (hideGroup && tag && v === tag) continue;
+    seen.add(v);
   }
   return [...seen].join(' · ');
 }
@@ -33,6 +41,8 @@ interface Props {
   past?: boolean;
   /** Reminder icon, drawn in the corner. */
   badge?: string | null;
+  /** A group is already selected, so its tag is noise. */
+  hideGroupLabel?: boolean;
 }
 
 export default function LessonCard({
@@ -46,16 +56,34 @@ export default function LessonCard({
   progress = null,
   past = false,
   badge = null,
+  hideGroupLabel = false,
 }: Props) {
   const skin = cardSkin(lesson, theme, settings);
   const layout = settings.fields[variant];
   const main = fieldText(lesson, settings, layout.main, variant);
   const right = fieldText(lesson, settings, layout.right, variant);
   const sub = fieldText(lesson, settings, layout.sub, variant);
-  const note = lessonNote(lesson);
-  const tiny = dense || settings.compact;
+  const mainParts = fieldParts(lesson, settings, layout.main, variant);
+  const rightParts = fieldParts(lesson, settings, layout.right, variant);
+  const subParts = fieldParts(lesson, settings, layout.sub, variant);
 
-  return (
+  /** Names Untis struck out are drawn struck out; the rest render as before. */
+  const renderParts = (parts: FieldPart[], fallback: string) => {
+    if (!parts.some((p) => p.struck)) return fallback;
+    return parts.map((p, i) => (
+      <Text key={`${p.text}-${i}`} style={p.struck ? styles.struck : undefined}>
+        {p.text}
+        {i < parts.length - 1 ? ', ' : ''}
+      </Text>
+    ));
+  };
+  const note = lessonNote(lesson, hideGroupLabel);
+  const flags = subjectFlagList(settings, lesson.subject);
+  const tiny = dense || settings.compact;
+  // width of the right-hand column, so the ribbon can sit just left of it
+  const [rightW, setRightW] = useState(0);
+
+  const card = (
     <View
       style={[
         styles.card,
@@ -81,38 +109,31 @@ export default function LessonCard({
         <Text style={[styles.badgeIcon, { fontSize: settings.badgeSize }]}>{badge}</Text>
       )}
       <View style={[styles.body, fill && styles.bodyFill]}>
-        <View style={styles.row}>
-          {!!main && (
-            <Text
-              style={[
-                styles.subject,
-                tiny && styles.subjectTiny,
-                {
-                  color: skin.text,
-                  textDecorationLine: lesson.cancelled ? 'line-through' : 'none',
-                },
-              ]}
-              numberOfLines={1}
-            >
-              {main}
-            </Text>
-          )}
-          {!!right && (
-            <Text
-              style={[styles.room, tiny && styles.roomTiny, { color: skin.dim }]}
-              numberOfLines={1}
-            >
-              {right}
-            </Text>
-          )}
-        </View>
+        {!!main && (
+          <Text
+            style={[
+              styles.subject,
+              {
+                fontSize: settings.mainSize,
+                color: pickTextColor(settings.textColorMain, skin.text),
+                textDecorationLine: lesson.cancelled ? 'line-through' : 'none',
+              },
+            ]}
+            numberOfLines={2}
+          >
+            {renderParts(mainParts, main)}
+          </Text>
+        )}
 
         {!!sub && (
           <Text
-            style={[styles.teacher, tiny && styles.teacherTiny, { color: skin.dim }]}
+            style={[
+              styles.teacher,
+              { fontSize: settings.subSize, color: pickTextColor(settings.textColorSub, skin.dim) },
+            ]}
             numberOfLines={1}
           >
-            {sub}
+            {renderParts(subParts, sub)}
           </Text>
         )}
 
@@ -146,11 +167,62 @@ export default function LessonCard({
           </Text>
         )}
       </View>
+
+      {!!right && (
+        <View
+          onLayout={(e) => setRightW(e.nativeEvent.layout.width)}
+          style={[
+            styles.rightBox,
+            settings.rightAlign === 'top' && { justifyContent: 'flex-start', paddingTop: 10 },
+            settings.rightAlign === 'bottom' && { justifyContent: 'flex-end', paddingBottom: 10 },
+          ]}
+        >
+          <View style={styles.rightRow}>
+            {!!right && (
+              <Text
+                style={[
+                  styles.room,
+                  {
+                    color: pickTextColor(settings.textColorRight, skin.dim),
+                    fontSize: settings.roomSize,
+                  },
+                ]}
+                numberOfLines={1}
+              >
+                {renderParts(rightParts, right)}
+              </Text>
+            )}
+          </View>
+        </View>
+      )}
+    </View>
+  );
+
+  if (!flags.length) return card;
+
+  return (
+    <View style={fill ? styles.fill : undefined}>
+      {card}
+      <View
+        pointerEvents="none"
+        style={[styles.flagCol, { right: (right ? rightW : 0) + 4 }]}
+      >
+        {flags.map((f) => (
+          <StickyNote
+            key={f}
+            color={f}
+            size={Math.round(settings.roomSize * 1.1)}
+            bg={skin.background}
+            notch={false}
+          />
+        ))}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  struck: { textDecorationLine: 'line-through' },
   card: {
     flexDirection: 'row',
     borderRadius: 12,
@@ -169,13 +241,12 @@ const styles = StyleSheet.create({
   badgeIcon: { position: 'absolute', right: 4, bottom: 2, zIndex: 3, includeFontPadding: false },
   body: { flex: 1, paddingHorizontal: 10 },
   bodyFill: { justifyContent: 'center', paddingVertical: 4 },
-  row: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 6 },
-  subject: { fontSize: 16, fontWeight: '700', flexShrink: 1 },
-  subjectTiny: { fontSize: 13 },
-  room: { fontSize: 13, fontWeight: '600' },
-  roomTiny: { fontSize: 11 },
-  teacher: { fontSize: 13, marginTop: 2 },
-  teacherTiny: { fontSize: 10, marginTop: 0 },
+  rightBox: { justifyContent: 'center', paddingHorizontal: 10, maxWidth: '52%' },
+  rightRow: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  flagCol: { position: 'absolute', top: 0, zIndex: 6, flexDirection: 'row', gap: 3 },
+  subject: { fontWeight: '700', flexShrink: 1 },
+  room: { fontWeight: '700', textAlign: 'right' },
+  teacher: { marginTop: 2 },
   note: { fontSize: 12, marginTop: 4, fontStyle: 'italic' },
   badge: { fontSize: 11, fontWeight: '800', letterSpacing: 1, marginTop: 4 },
 });

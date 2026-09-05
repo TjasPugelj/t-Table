@@ -1,5 +1,5 @@
 import { Lesson } from '../api/types';
-import { Settings } from '../store/settings';
+import { Settings, subjectKey } from '../store/settings';
 import { StyleSheet } from 'react-native';
 import { Theme } from '../theme';
 
@@ -62,14 +62,15 @@ export function withAlpha(hex: string, alpha: number): string {
 /** The lesson's colour before any card styling is applied. */
 export function lessonColor(lesson: Lesson, theme: Theme, settings: Settings): string {
   if (lesson.cancelled) return theme.cancelled;
-  const custom = settings.subjectColors?.[lesson.subject];
+  const key = subjectKey(settings, lesson.subject);
+  const custom = settings.subjectColors?.[key];
   if (custom) return custom;
   if (lesson.exam) return theme.exam;
   switch (settings.colorSource) {
     case 'subject':
-      return subjectColor(lesson.subjectLong || lesson.subject);
+      return subjectColor(key);
     case 'untis':
-      return lesson.color ?? subjectColor(lesson.subject);
+      return lesson.color ?? subjectColor(key);
     default:
       return lesson.changed ? theme.changed : theme.accent;
   }
@@ -128,3 +129,10 @@ export function cardSkin(lesson: Lesson, theme: Theme, settings: Settings): Card
     stripeColor: base,
   };
 }
+
+
+/** Forces black or white where the user asked for it, otherwise keeps the card's own colour. */
+export const pickTextColor = (
+  mode: 'auto' | 'black' | 'white',
+  auto: string,
+): string => (mode === 'black' ? '#0d1015' : mode === 'white' ? '#ffffff' : auto);

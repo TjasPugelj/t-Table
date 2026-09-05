@@ -18,7 +18,9 @@
       },
       "permissions": [
         "SCHEDULE_EXACT_ALARM",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
       ],
       "package": "com.tjas.urnik",
       "versionCode": 1,
@@ -33,7 +35,20 @@
         {
           "color": "#4c8dff"
         }
-      ]
-    ]
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Used to scan the WebUntis QR code when linking your account."
+        }
+      ],
+      "expo-secure-store",
+      "expo-status-bar"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "916b918c-655e-4c16-a696-70eef68e5994"
+      }
+    }
   }
 }

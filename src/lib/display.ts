@@ -46,3 +46,37 @@ export function fieldText(
       return '';
   }
 }
+
+/** One piece of a card slot: a name plus whether Untis struck it out. */
+export interface FieldPart {
+  text: string;
+  struck: boolean;
+}
+
+/**
+ * Same as fieldText, but keeps each name separate so a removed teacher or room
+ * can be drawn struck through the way the official app draws it.
+ */
+export function fieldParts(
+  l: Lesson,
+  s: Settings,
+  field: 'subject' | 'teacher' | 'room' | 'none',
+  variant: NameVariant,
+): FieldPart[] {
+  switch (field) {
+    case 'subject':
+      return [{ text: displaySubject(l, s, variant), struck: false }];
+    case 'teacher':
+      return displayTeachers(l, s, variant).map((text, i) => ({
+        text,
+        struck: !!l.teachersStruck?.[i],
+      }));
+    case 'room':
+      return displayRooms(l, s, variant).map((text, i) => ({
+        text,
+        struck: !!l.roomsStruck?.[i],
+      }));
+    default:
+      return [];
+  }
+}

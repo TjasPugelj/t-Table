@@ -10,7 +10,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { addDays, isSameDay, isWeekend, startOfWeek } from '../lib/date';
+import { addDays, isSameDay, isWeekend, skipWeekend, startOfWeek } from '../lib/date';
 import { useSettings } from '../store/settings';
 
 const HOP = Math.min(110, Dimensions.get('window').width * 0.28);
@@ -186,7 +186,7 @@ export default function DatePicker({
           </View>
 
           <View style={s.foot}>
-            <Pressable onPress={() => onPick(new Date())} style={s.footBtn}>
+            <Pressable onPress={() => onPick(skipWeekend(new Date()))} style={s.footBtn}>
               <Text style={[s.footTxt, { color: theme.accent }]}>{t.today}</Text>
             </Pressable>
             <Pressable onPress={onClose} style={s.footBtn}>
