@@ -58,7 +58,7 @@ Without an account the app still works — it shows a class's public timetable, 
 ## Build it yourself
 
 ```bash
-git clone https://github.com/tjaspugelj-coder/t-Table.git
+git clone https://github.com/TjasPugelj/t-Table.git
 cd t-Table
 npm install
 ```
