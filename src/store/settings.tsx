@@ -147,7 +147,7 @@ export const DEFAULTS: Settings = {
     week: { main: 'subject', right: 'none', sub: 'room' },
   },
   colorSource: 'subject',
-  cardStyle: 'tint',
+  cardStyle: 'solid',
   subjectColors: {},
   aliases: { subjects: {}, teachers: {}, rooms: {} },
   aliasesWeek: { subjects: {}, teachers: {}, rooms: {} },

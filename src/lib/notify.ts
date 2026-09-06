@@ -64,7 +64,7 @@ export async function ensurePermission(): Promise<boolean> {
   try {
     if (Platform.OS === 'android') {
       await N.setNotificationChannelAsync('reminders', {
-        name: 'Urnik',
+        name: 't-Table',
         importance: N.AndroidImportance.HIGH,
         vibrationPattern: [0, 250, 250, 250],
       });
@@ -146,7 +146,7 @@ export async function sendTestNotification(delaySeconds = 5): Promise<boolean> {
   try {
     await N.scheduleNotificationAsync({
       content: {
-        title: '🔔 Urnik',
+        title: '🔔 t-Table',
         body: `Test · ${new Date().toLocaleTimeString()}`,
         data: { test: true },
       },

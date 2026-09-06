@@ -9,7 +9,7 @@ import {
   View,
 } from 'react-native';
 import { pairWithPassword } from '../api/passwordAuth';
-import { pairAccount, parseUntisQR } from '../api/qrAuth';
+import { pairAccount, parseUntisQR, UntisQR, UsernameUnknownError } from '../api/qrAuth';
 import { LinkedAccount, useAccount } from '../store/account';
 import { useSettings } from '../store/settings';
 import { Theme } from '../theme';
@@ -22,6 +22,12 @@ export default function LinkAccountScreen({ onClose }: { onClose: () => void }) 
   const [method, setMethod] = useState<Method>('qr');
   const [permission, requestPermission] = useCameraPermissions();
   const [pasted, setPasted] = useState('');
+  // WebUntis mangles non-ASCII usernames into "?" when it generates the QR, and
+  // that username can never log in. pairAccount tries the likely letters itself;
+  // this pair of fields is the manual fallback for when none of them matched.
+  const [pending, setPending] = useState<UntisQR | null>(null);
+  const [pendingUser, setPendingUser] = useState('');
+  const [resolving, setResolving] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -38,23 +44,54 @@ export default function LinkAccountScreen({ onClose }: { onClose: () => void }) 
         setError(t.invalidQr);
         return;
       }
+      // stop the camera firing again while this scan is being used
       handledRef.current = true;
-      setBusy(true);
       setError(null);
+      setBusy(true);
+      // a mangled username makes pairing slower — say what the wait is for
+      setResolving(qr.user.includes('?'));
       try {
-        const paired = await pairAccount(qr);
-        const account: LinkedAccount = paired;
+        const account: LinkedAccount = await pairAccount(qr);
         await link(account);
         onClose();
       } catch (e: any) {
-        setError(e?.message ?? t.linkFailed);
-        handledRef.current = false;
+        if (e instanceof UsernameUnknownError) {
+          // none of the substitutions matched — let the user type it
+          setPending(qr);
+          setPendingUser(qr.user);
+        } else {
+          setError(e?.message ?? t.linkFailed);
+          handledRef.current = false;
+        }
       } finally {
+        setResolving(false);
         setBusy(false);
       }
     },
     [busy, link, onClose, t],
   );
+
+  const confirmQr = useCallback(async () => {
+    if (!pending || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const paired = await pairAccount({ ...pending, user: pendingUser.trim() });
+      const account: LinkedAccount = paired;
+      await link(account);
+      onClose();
+    } catch (e: any) {
+      setError(e instanceof UsernameUnknownError ? t.userMangledHint : e?.message ?? t.linkFailed);
+    } finally {
+      setBusy(false);
+    }
+  }, [pending, pendingUser, busy, link, onClose, t]);
+
+  const rescan = useCallback(() => {
+    setPending(null);
+    setError(null);
+    handledRef.current = false;
+  }, []);
 
   const tryLinkPassword = useCallback(async () => {
     if (busy || !username.trim() || !password) return;
@@ -107,6 +144,43 @@ export default function LinkAccountScreen({ onClose }: { onClose: () => void }) 
       </View>
 
       {method === 'qr' ? (
+        pending ? (
+          <>
+            <Text style={s.hint}>{t.qrScanned}</Text>
+
+            <Text style={s.fieldLabel}>{t.confirmUser}</Text>
+            <TextInput
+              style={s.input}
+              value={pendingUser}
+              onChangeText={setPendingUser}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {pendingUser.includes('?') && <Text style={s.warn}>{t.userMangledHint}</Text>}
+
+            <Text style={s.scannedMeta}>
+              {pending.school} · {pending.host}
+            </Text>
+
+            {!!error && <Text style={s.err}>{error}</Text>}
+
+            <Pressable
+              style={[s.btn, { marginTop: 16 }, (!pendingUser.trim() || busy) && { opacity: 0.5 }]}
+              disabled={!pendingUser.trim() || busy}
+              onPress={confirmQr}
+            >
+              {busy ? (
+                <ActivityIndicator color={theme.accentText} />
+              ) : (
+                <Text style={s.btnTxt}>{t.linkAccount}</Text>
+              )}
+            </Pressable>
+
+            <Pressable style={[s.btnGhost, { marginTop: 8 }]} onPress={rescan}>
+              <Text style={s.btnGhostTxt}>{t.scanAgain}</Text>
+            </Pressable>
+          </>
+        ) : (
         <>
           <Text style={s.hint}>{t.scanQrHint}</Text>
 
@@ -130,7 +204,7 @@ export default function LinkAccountScreen({ onClose }: { onClose: () => void }) 
             {busy && (
               <View style={s.busyOverlay}>
                 <ActivityIndicator color="#fff" size="large" />
-                <Text style={s.busyTxt}>{t.linking}</Text>
+                <Text style={s.busyTxt}>{resolving ? t.resolvingUser : t.linking}</Text>
               </View>
             )}
           </View>
@@ -157,6 +231,7 @@ export default function LinkAccountScreen({ onClose }: { onClose: () => void }) 
             </Pressable>
           </View>
         </>
+        )
       ) : (
         <>
           <Text style={s.hint}>{t.passwordHint}</Text>
@@ -257,6 +332,16 @@ const makeStyles = (t: Theme) =>
     },
     busyTxt: { color: '#fff', fontWeight: '700' },
     err: { color: t.cancelled, fontSize: 13, marginTop: 12 },
+    warn: { color: t.changed, fontSize: 12, lineHeight: 17, marginTop: 6 },
+    scannedMeta: { color: t.textDim, fontSize: 12, marginTop: 10 },
+    btnGhost: {
+      borderRadius: 10,
+      paddingVertical: 12,
+      alignItems: 'center',
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: t.border,
+    },
+    btnGhostTxt: { color: t.text, fontWeight: '600' },
     fieldLabel: { color: t.textDim, fontSize: 12, fontWeight: '600', marginTop: 20 },
     pasteRow: { gap: 8, marginTop: 6 },
     input: {

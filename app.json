@@ -1,8 +1,8 @@
 {
   "expo": {
-    "name": "Urnik",
+    "name": "t-Table",
     "slug": "urnik",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
@@ -23,7 +23,7 @@
         "android.permission.RECORD_AUDIO"
       ],
       "package": "com.tjas.urnik",
-      "versionCode": 2,
+      "versionCode": 3,
       "edgeToEdgeEnabled": true
     },
     "web": {

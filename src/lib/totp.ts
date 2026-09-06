@@ -8,16 +8,26 @@
  * log in as the real account without ever touching the user's password.
  */
 
-/** RFC 4648 base32 decode (the alphabet WebUntis secrets are encoded in). */
+/**
+ * RFC 4648 base32 decode (the alphabet WebUntis secrets are encoded in).
+ *
+ * Throws on a character outside the alphabet rather than skipping it: silently
+ * dropping one character shifts every bit after it, producing a secret that
+ * looks fine and generates codes the server rejects as "bad credentials" —
+ * with nothing to point at the cause.
+ */
 function base32Decode(input: string): Uint8Array {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-  const clean = input.toUpperCase().replace(/=+$/, '').replace(/\s+/g, '');
+  // separators people paste in are fine; unknown letters are not
+  const clean = input.toUpperCase().replace(/[\s-]+/g, '').replace(/=+$/, '');
   const bytes: number[] = [];
   let bits = 0;
   let value = 0;
   for (const ch of clean) {
     const idx = alphabet.indexOf(ch);
-    if (idx === -1) continue; // skip stray separators just in case
+    if (idx === -1) {
+      throw new Error(`Secret is not valid base32 (unexpected "${ch}")`);
+    }
     value = (value << 5) | idx;
     bits += 5;
     if (bits >= 8) {
